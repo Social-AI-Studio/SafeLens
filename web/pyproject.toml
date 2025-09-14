@@ -1,0 +1,38 @@
+[project]
+name = "harmful-moderation"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.3.1",
+    "opencv-python>=4.11.0.86",
+    "pillow>=11.3.0",
+    "pytesseract>=0.3.13",
+    "python-dotenv>=1.1.1",
+    "torch>=2.7.1",
+    "transformers>=4.53.2",
+    "whisperx>=3.4.2",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "python-multipart>=0.0.6",
+    "sqlalchemy>=2.0.41",
+    "psycopg-binary>=3.2.9",
+    "alembic>=1.16.4",
+    "psycopg[binary]>=3.2.9",
+    "psutil>=6.0.0",
+    "yt-dlp>=2025.8.11",
+    "validators>=0.35.0",
+    "easyocr>=1.7",
+]
+
+[tool.ruff]
+preview = true
+
+[lint]
+select = ["W292", "W391"]
+fixable = ["W292", "W391"]
+
+[format]
+line-ending = "lf"
+
