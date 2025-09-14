@@ -40,7 +40,7 @@ docker run --name safelens_web_db \
 
 Notes
 
-- The named volume `harmful_moderation_data` persists data across container restarts.
+- The named volume `safelens_web_data` persists data across container restarts.
 - If another service is already using port 5432, change the host port (e.g., `-p 5433:5432`) and update `DATABASE_URL` accordingly.
 
 ## 3) Install backend dependencies
