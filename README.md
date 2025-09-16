@@ -32,7 +32,7 @@
 
 ## Evaluation
 
-We benchmarked multiple policy LLMs and vision–language (VL) back ends on **19 videos** (~**10%** of the training data) using two complementary views: **duration-weighted** (time micro-average) and **segment-level** (count micro-average).
+We benchmarked multiple policy LLMs and vision–language (VL) back ends on **19 videos** (~**10%** of the dataset used) using two complementary views: **duration-weighted** (time micro-average) and **segment-level** (count micro-average).
 
 Ground truth: **1,593 s harmful of 4,400 s total (~36.2%)**; **183 harmful segments of 530 (~34.5%)**.
 
