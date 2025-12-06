@@ -139,6 +139,7 @@ export default function SyncedLyrics({ words, config = {} }: SyncedLyricsProps) 
         wordStartsByLine,
         highlightMode,
         autoScrollToLine,
+        leadMs,
     ]);
 
     // Click handlers for seeking
@@ -177,10 +178,10 @@ export default function SyncedLyrics({ words, config = {} }: SyncedLyricsProps) 
                         key={lineIndex}
                         data-line-index={lineIndex}
                         role="listitem"
-                        className={`cursor-pointer transition-all duration-200 leading-relaxed ${
+                        className={`cursor-pointer transition-all duration-200 leading-relaxed py-2 ${
                             lineIndex === currentLineIndex
-                                ? "text-lg font-semibold opacity-100 text-foreground"
-                                : "text-lg opacity-60 hover:opacity-80 text-muted-foreground"
+                                ? "text-2xl font-bold opacity-100 text-foreground"
+                                : "text-xl opacity-50 hover:opacity-80 text-muted-foreground"
                         }`}
                         onClick={() => handleLineClick(line)}
                         aria-label={`Line ${lineIndex + 1}: ${line.text}`}

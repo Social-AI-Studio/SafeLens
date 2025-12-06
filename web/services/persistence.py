@@ -59,6 +59,7 @@ def insert_harmful_events(db: Session, analysis_run_id: int, video_id: str, plan
             data = ev.get("analysis_data", {})
             conf = int(data.get("confidence", 0))
             cats = data.get("categories", [])
+            factor_weights = data.get("factor_weights")
             explanation = data.get("explanation", "")
             performed = ev.get("analysis_performed", [])
 
@@ -69,6 +70,9 @@ def insert_harmful_events(db: Session, analysis_run_id: int, video_id: str, plan
                 end_time=end_s,
                 confidence_score=conf,
                 categories=json.dumps(cats, ensure_ascii=False),
+                factor_weights=json.dumps(factor_weights, ensure_ascii=False)
+                if factor_weights is not None
+                else None,
                 explanation=explanation,
                 analysis_performed=json.dumps(performed, ensure_ascii=False),
                 planning_mode=planning_mode,

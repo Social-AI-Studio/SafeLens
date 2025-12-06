@@ -1,5 +1,5 @@
 import { useSession } from "next-auth/react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 
 interface RegistrationResult {
     success: boolean;
@@ -16,15 +16,7 @@ export function useRegistration() {
     >("idle");
     const [error, setError] = useState<string | null>(null);
 
-    useEffect(() => {
-        const needsRegistration = session?.needsRegistration;
-
-        if (session && needsRegistration && registrationStatus === "idle") {
-            handleRegistration();
-        }
-    }, [session, registrationStatus]);
-
-    const handleRegistration = async () => {
+    const handleRegistration = useCallback(async () => {
         if (registrationStatus === "registering") return; // Prevent double submission
 
         setRegistrationStatus("registering");
@@ -74,7 +66,15 @@ export function useRegistration() {
             setError(errorMessage);
             setRegistrationStatus("error");
         }
-    };
+    }, [registrationStatus, update]);
+
+    useEffect(() => {
+        const needsRegistration = session?.needsRegistration;
+
+        if (session && needsRegistration && registrationStatus === "idle") {
+            handleRegistration();
+        }
+    }, [session, registrationStatus, handleRegistration]);
 
     const retryRegistration = () => {
         if (registrationStatus === "error") {

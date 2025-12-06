@@ -10,6 +10,11 @@ export interface HarmfulContent {
     source?: "vision" | "audio" | "ocr" | "multimodal";
     detectionMethod?: string;
     categories?: string[];
+    factorWeights?: {
+        visual?: number;
+        audio?: number;
+        text?: number;
+    };
     rawData?: any; // Store original backend event data
 }
 
@@ -31,6 +36,7 @@ export interface AnalysisData {
     harmfulContent: HarmfulContent[]; // Keep original for backward compatibility
     clusteredHarmfulContent?: ClusteredHarmfulContent[]; // New clustered data
     analysisModel?: string;
+    videoDuration?: number; // seconds, from backend metadata if available
     clusteringConfig?: ClusteringConfig;
     transcriptionWords?: TranscriptionWord[]; // Word-level timestamps for synced lyrics
     transcriptionLines?: TranscriptionLine[]; // Optional cached line segmentation

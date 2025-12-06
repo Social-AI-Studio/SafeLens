@@ -86,6 +86,7 @@ class HarmfulEvent(Base):
     )
     timestamp = Column(Float, nullable=False)
     categories = Column(Text, nullable=True)
+    factor_weights = Column(Text, nullable=True)
     verification_source = Column(String(50), nullable=True)
     explanation = Column(Text, nullable=True)
     confidence_score = Column(Integer, nullable=True)
