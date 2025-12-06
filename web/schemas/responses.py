@@ -105,6 +105,9 @@ class DownloadStatusResponse(BaseModel):
     download_status: str
     analysis_status: str
     download_error: Optional[str] = None
+    download_error_code: Optional[str] = None
+    download_progress: Optional[int] = None
     original_url: Optional[str] = None
     provider: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    retry_after: Optional[int] = None

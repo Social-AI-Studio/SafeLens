@@ -68,6 +68,8 @@ class Video(Base):
     download_status = Column(String, default="pending")
     download_metadata = Column(Text, nullable=True)
     download_error = Column(Text, nullable=True)
+    download_error_code = Column(String(50), nullable=True)
+    download_progress = Column(Integer, nullable=True)
 
     account = relationship("Account", back_populates="videos")
     harmful_events = relationship("HarmfulEvent", back_populates="video")

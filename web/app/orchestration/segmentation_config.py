@@ -42,6 +42,9 @@ class SegmentationConfig:
     max_frames_per_segment: int = 10
     suspicion_mode: str = "keywords"  # keywords|llm|off
     seg_llm_timeout_sec: float = 30.0
+
+    # Visual boundary capping
+    max_visual_frames: Optional[int] = None
     
     @classmethod
     def from_env(cls) -> "SegmentationConfig":
@@ -67,7 +70,8 @@ class SegmentationConfig:
             seg_suspicious_sample_sec=float(os.getenv("SEG_SUS_SAMPLE_SEC", cls.seg_suspicious_sample_sec)),
             max_frames_per_segment=int(os.getenv("MAX_FRAMES_PER_SEG", cls.max_frames_per_segment)),
             suspicion_mode=os.getenv("SUSPICION_MODE", cls.suspicion_mode),
-            seg_llm_timeout_sec=float(os.getenv("SEG_LLM_TIMEOUT_SEC", cls.seg_llm_timeout_sec))
+            seg_llm_timeout_sec=float(os.getenv("SEG_LLM_TIMEOUT_SEC", cls.seg_llm_timeout_sec)),
+            max_visual_frames=int(os.getenv("SEG_MAX_VISUAL_FRAMES", 0)) or None,
         )
     
     def validate(self) -> None:
@@ -92,6 +96,8 @@ class SegmentationConfig:
             raise ValueError("suspicion_mode must be 'keywords', 'llm', or 'off'")
         if self.seg_llm_timeout_sec <= 0:
             raise ValueError("seg_llm_timeout_sec must be positive")
+        if self.max_visual_frames is not None and self.max_visual_frames <= 1:
+            raise ValueError("max_visual_frames must be greater than 1 when set")
 
 
 # Default configuration instance

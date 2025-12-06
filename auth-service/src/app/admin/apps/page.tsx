@@ -67,7 +67,7 @@ export default async function AdminAppsPage() {
                                                 {a.clientId}
                                             </td>
                                             <td className="px-4 py-3 text-xs break-all">
-                                                {a.redirectURLs}
+                                                {a.redirectUrls}
                                             </td>
                                             <td className="px-4 py-3">
                                                 {a.createdAt?.toLocaleString?.() ?? ""}

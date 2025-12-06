@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 import validators
 
 from ..database import get_db, Account, Video
-from ..services.url_downloader import VideoURLDownloader
+from ..services.url_downloader import VideoURLDownloader, DownloadErrorCode, ERROR_MESSAGES
 from ..schemas.responses import (
     VideoInfo,
     UploadResponse,
@@ -229,6 +229,7 @@ async def get_video_info(video_id: str):
 
 
 @router.get("/videos/{video_id}/video.mp4")
+@router.head("/videos/{video_id}/video.mp4")
 async def serve_video(video_id: str):
     """Serve video file for playback"""
     video_dir = UPLOAD_FOLDER.resolve() / video_id
@@ -243,7 +244,11 @@ async def serve_video(video_id: str):
             status_code=404, detail=f"Video file not found: {video_file}"
         )
 
-    return FileResponse(str(video_file), media_type="video/mp4")
+    return FileResponse(
+        str(video_file), 
+        media_type="video/mp4",
+        headers={"Accept-Ranges": "bytes"},
+    )
 
 
 @router.get("/videos/{video_id}/thumbnail.jpg")
@@ -442,21 +447,17 @@ async def get_analysis_results(
                 else []
             )
 
-            harmful_events.append(
-                {
-                    "id": event.id,
-                    "timestamp": event.timestamp,
-                    "categories": json.loads(event.categories)
-                    if event.categories
-                    else [],
-                    "verification_source": event.verification_source,
-                    "explanation": event.explanation,
-                    "confidence_score": event.confidence_score,
-                    "severity": event.severity,
-                    "visual_evidence": visual_evidence,
-                    "audio_evidence": audio_evidence,
-                }
-            )
+            harmful_events.append({
+                "id": event.id,
+                "timestamp": event.timestamp,
+                "categories": json.loads(event.categories) if event.categories else [],
+                "verification_source": event.verification_source,
+                "explanation": event.explanation,
+                "confidence_score": event.confidence_score,
+                "severity": event.severity,
+                "visual_evidence": visual_evidence,
+                "audio_evidence": audio_evidence,
+            })
 
         transcription = None
         if video.transcription:
@@ -614,14 +615,21 @@ async def get_download_status(
         except (json.JSONDecodeError, TypeError):
             metadata = None
 
+    retry_after = None
+    if video.download_error_code == DownloadErrorCode.RATE_LIMITED.value:
+        retry_after = 60
+
     return DownloadStatusResponse(
         video_id=video_id,
         download_status=video.download_status,
         analysis_status=video.analysis_status,
         download_error=video.download_error,
+        download_error_code=video.download_error_code,
+        download_progress=video.download_progress,
         original_url=video.original_url,
         provider=video.download_provider,
         metadata=metadata,
+        retry_after=retry_after,
     )
 
 
@@ -632,6 +640,40 @@ def download_video_task(video_id: str, url: str, analysis_model: str):
 
     db = SessionLocal()
 
+    download_state = {
+        "current_stream": 0,
+        "stream_count": 2,
+        "last_progress": 0,
+    }
+
+    def progress_callback(d):
+        """Update download progress in database, handling multi-stream downloads"""
+        if d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            downloaded = d.get("downloaded_bytes", 0)
+            if total and total > 0:
+                stream_progress = int((downloaded / total) * 100)
+                
+                stream_base = (download_state["current_stream"] * 100) // download_state["stream_count"]
+                stream_weight = 100 // download_state["stream_count"]
+                combined_progress = stream_base + (stream_progress * stream_weight) // 100
+                
+                combined_progress = max(download_state["last_progress"], combined_progress)
+                
+                if combined_progress > download_state["last_progress"]:
+                    download_state["last_progress"] = combined_progress
+                    try:
+                        video = db.query(Video).filter(Video.id == video_id).first()
+                        if video and video.download_progress != combined_progress:
+                            video.download_progress = combined_progress
+                            db.commit()
+                    except Exception as e:
+                        logger.debug(f"Failed to update progress for {video_id}: {e}")
+        
+        elif d.get("status") == "finished":
+            download_state["current_stream"] += 1
+            logger.debug(f"Stream {download_state['current_stream']} finished for {video_id}")
+
     try:
         video = db.query(Video).filter(Video.id == video_id).first()
         if not video:
@@ -639,22 +681,26 @@ def download_video_task(video_id: str, url: str, analysis_model: str):
             return
 
         video.download_status = "downloading"
+        video.download_progress = 0
         db.commit()
 
-        result = downloader.download_video(url, video_id)
+        result = downloader.download_video(url, video_id, progress_callback=progress_callback)
 
-        if result["success"]:
+        if result.success:
             video.download_status = "completed"
-            video.download_provider = result["provider"]
-            video.download_metadata = json.dumps(result["metadata"])
-            video.file_size = result["metadata"]["file_size"]
-            video.original_filename = result["metadata"]["title"] + ".mp4"
+            video.download_progress = 100
+            video.download_provider = result.provider
+            video.download_metadata = json.dumps(result.metadata)
+            video.file_size = result.metadata["file_size"]
+            video.original_filename = result.metadata["title"] + ".mp4"
+            video.download_error = None
+            video.download_error_code = None
 
             try:
                 from ..tools.frame_extraction import extract_frames
 
                 frames_output = extract_frames(
-                    video_path=result["file_path"],
+                    video_path=result.file_path,
                     timestamps=[0],
                     output_dir="frames",
                 )
@@ -664,21 +710,22 @@ def download_video_task(video_id: str, url: str, analysis_model: str):
 
             metadata_file = UPLOAD_FOLDER / video_id / "metadata.json"
             with open(metadata_file, "w") as f:
-                json.dump(result["metadata"], f, indent=2)
+                json.dump(result.metadata, f, indent=2)
 
             db.commit()
 
             import asyncio
             from ..services.analysis_pipeline import analyze_video_task
 
-            asyncio.run(analyze_video_task(video_id, result["file_path"], db))
+            asyncio.run(analyze_video_task(video_id, result.file_path, db))
 
         else:
             video.download_status = "failed"
-            video.download_error = result["error"]
+            video.download_error = result.error_message
+            video.download_error_code = result.error_code.value
             video.analysis_status = "failed"
             db.commit()
-            logger.error(f"Failed to download video {video_id}: {result['error']}")
+            logger.error(f"Failed to download video {video_id}: {result.error_message} (code: {result.error_code.value})")
 
     except Exception as e:
         try:
@@ -686,6 +733,7 @@ def download_video_task(video_id: str, url: str, analysis_model: str):
             if video:
                 video.download_status = "failed"
                 video.download_error = str(e)
+                video.download_error_code = DownloadErrorCode.UNKNOWN_ERROR.value
                 video.analysis_status = "failed"
                 db.commit()
         except Exception as db_error:

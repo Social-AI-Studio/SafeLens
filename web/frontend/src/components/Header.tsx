@@ -18,8 +18,9 @@ export default function Header() {
     const { data: session, status } = useSession();
     const user = session?.user;
 
-    const handleLogout = () => {
-        signOut();
+    const handleLogout = async () => {
+        // Explicitly redirect home and wait for cookie clear
+        await signOut({ callbackUrl: "/", redirect: true });
     };
 
     const getInitials = (name: string) => {
@@ -32,7 +33,7 @@ export default function Header() {
 
     return (
         <header className="border-b border-border">
-            <div className="container mx-auto px-4 py-4 flex items-center justify-between">
+            <div className="w-full px-4 sm:px-6 lg:px-10 py-4 flex items-center justify-between">
                 <div
                     className="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity"
                     onClick={() => router.push("/")}

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { authFetch } from "@/lib/authFetch";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { format } from "date-fns";
@@ -25,9 +26,17 @@ export default function UserVideos() {
     const [videos, setVideos] = useState<Video[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [thumbnailState, setThumbnailState] = useState<
+        Record<string, { src: string; attempts: number }>
+    >({});
     const router = useRouter();
     const { data: session, status } = useSession();
     const user = session?.user;
+
+    const MAX_THUMBNAIL_ATTEMPTS = 2;
+
+    const placeholderThumbnail =
+        "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23f3f4f6'/%3E%3Ctext x='50' y='50' text-anchor='middle' dy='.3em' font-size='12' fill='%236b7280'%3EVideo%3C/text%3E%3C/svg%3E";
 
     useEffect(() => {
         if (status === "authenticated" && user?.id) {
@@ -37,7 +46,7 @@ export default function UserVideos() {
 
     const fetchUserVideos = async () => {
         try {
-            const response = await fetch("/api/user/videos");
+            const response = await authFetch("/api/user/videos");
 
             if (!response.ok) {
                 throw new Error("Failed to fetch videos");
@@ -78,6 +87,39 @@ export default function UserVideos() {
             default:
                 return "bg-gray-500/10 text-gray-500 border-gray-500/20";
         }
+    };
+
+    const getThumbnailSrc = (videoId: string) =>
+        thumbnailState[videoId]?.src ?? `/api/thumbnail/${videoId}`;
+
+    const handleThumbnailError = (videoId: string) => {
+        setThumbnailState((prev) => {
+            const prevEntry =
+                prev[videoId] ?? ({
+                    src: `/api/thumbnail/${videoId}`,
+                    attempts: 0,
+                } as const);
+
+            const nextAttempts = prevEntry.attempts + 1;
+
+            if (nextAttempts >= MAX_THUMBNAIL_ATTEMPTS) {
+                return {
+                    ...prev,
+                    [videoId]: {
+                        src: placeholderThumbnail,
+                        attempts: nextAttempts,
+                    },
+                };
+            }
+
+            return {
+                ...prev,
+                [videoId]: {
+                    src: `/api/thumbnail/${videoId}?retry=${nextAttempts}`,
+                    attempts: nextAttempts,
+                },
+            };
+        });
     };
 
     if (loading || status === "loading") {
@@ -136,15 +178,11 @@ export default function UserVideos() {
                     >
                         <div className="aspect-video bg-gray-100 relative">
                             <Image
-                                src={`/api/thumbnail/${video.video_id}`}
+                                src={getThumbnailSrc(video.video_id)}
                                 alt={video.original_filename}
                                 fill
                                 className="object-cover"
-                                onError={(e) => {
-                                    // Fallback to placeholder if thumbnail fails to load
-                                    (e.target as HTMLImageElement).src =
-                                        "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23f3f4f6'/%3E%3Ctext x='50' y='50' text-anchor='middle' dy='.3em' font-size='12' fill='%236b7280'%3EVideo%3C/text%3E%3C/svg%3E";
-                                }}
+                                onError={() => handleThumbnailError(video.video_id)}
                             />
                         </div>
                         <CardHeader className="pb-3">

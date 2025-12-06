@@ -6,6 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import VideoUpload from "@/components/VideoUpload";
 import UserVideos from "@/components/UserVideos";
 import { useSession } from "next-auth/react";
+import { authFetch } from "@/lib/authFetch";
 
 export default function Home() {
     const [isUploading, setIsUploading] = useState(false);
@@ -86,7 +87,7 @@ export default function Home() {
         setUploadProgress(0);
 
         try {
-            const response = await fetch("/api/upload/url", {
+            const response = await authFetch("/api/upload/url", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -108,7 +109,7 @@ export default function Home() {
             // Poll for download status with better progress tracking
             const pollDownloadStatus = async () => {
                 try {
-                    const statusResponse = await fetch(
+                    const statusResponse = await authFetch(
                         `/api/download/${videoId}/status`,
                     );
                     if (statusResponse.ok) {
@@ -120,28 +121,32 @@ export default function Home() {
 
                         // Update progress based on status
                         if (statusData.download_status === "pending") {
-                            setUploadProgress(10); // Just started
-                            setTimeout(pollDownloadStatus, 2000);
+                            setUploadProgress(5);
+                            setTimeout(pollDownloadStatus, 1000);
                         } else if (statusData.download_status === "downloading") {
-                            setUploadProgress(30); // Downloading
-                            setTimeout(pollDownloadStatus, 2000);
+                            const progress = statusData.download_progress ?? 10;
+                            setUploadProgress(Math.max(10, Math.min(95, progress)));
+                            setTimeout(pollDownloadStatus, 500);
                         } else if (statusData.download_status === "completed") {
-                            // Download complete - navigate to video page immediately
-                            setUploadProgress(100); // Download done
+                            setUploadProgress(100);
                             setIsUploading(false);
                             setIsNavigating(true);
                             router.push(`/${videoId}`);
                         } else if (statusData.download_status === "failed") {
-                            throw new Error(
-                                statusData.download_error || "Download failed",
-                            );
+                            setIsUploading(false);
+                            setUploadProgress(0);
+                            alert(statusData.download_error || "Download failed");
                         }
                     } else {
-                        throw new Error("Failed to check download status");
+                        setIsUploading(false);
+                        setUploadProgress(0);
+                        alert("Failed to check download status");
                     }
                 } catch (error) {
                     console.error("Status polling error:", error);
-                    throw error;
+                    setIsUploading(false);
+                    setUploadProgress(0);
+                    alert("Download failed. Please try again.");
                 }
             };
 
@@ -159,26 +164,14 @@ export default function Home() {
     return (
         <main className="container mx-auto px-4 py-8 relative">
             <div className="max-w-6xl mx-auto space-y-12">
-                <div>
-                    <div className="text-center mb-8">
-                        <h2 className="text-3xl font-bold mb-4">
-                            Upload Video for Analysis
-                        </h2>
-                        <p className="text-muted-foreground">
-                            Upload your video to detect harmful content using AI-powered
-                            analysis
-                        </p>
-                    </div>
-
-                    <VideoUpload
-                        onVideoSelectAction={handleVideoSelect}
-                        onVideoUrlAction={handleVideoUrl}
-                        onModelChange={setSelectedModel}
-                        selectedModel={selectedModel}
-                        isUploading={isUploading}
-                        uploadProgress={uploadProgress}
-                    />
-                </div>
+                <VideoUpload
+                    onVideoSelectAction={handleVideoSelect}
+                    onVideoUrlAction={handleVideoUrl}
+                    onModelChange={setSelectedModel}
+                    selectedModel={selectedModel}
+                    isUploading={isUploading}
+                    uploadProgress={uploadProgress}
+                />
 
                 <UserVideos />
             </div>

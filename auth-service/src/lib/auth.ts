@@ -29,8 +29,9 @@ export const auth = betterAuth({
         jwt({
             jwks: { keyPairConfig: { alg: "EdDSA", crv: "Ed25519" } },
             jwt: {
-                issuer: process.env.AUTH_BASE_URL,
-                audience: process.env.AUTH_BASE_URL,
+                // Emit tokens with origin-only issuer/audience to satisfy clients that expect no path
+                issuer: new URL(process.env.AUTH_BASE_URL as string).origin,
+                audience: new URL(process.env.AUTH_BASE_URL as string).origin,
             },
             disableSettingJwtHeader: true,
         }),
@@ -38,19 +39,30 @@ export const auth = betterAuth({
             useJWTPlugin: true,
             loginPage: "/sign-in",
             trustedClients: [
+                {
+                    clientId: "256801d076d678f34cef8513e887f878",  // harmful-moderation
+                    clientSecret: "9d76be99b2af553a3dcb2c5f6693684d0c6e3f1dbd6a7babe301a4eff9e8b598",
+                    name: "Harmful Moderation",
+                    type: "web",
+                    redirectUrls: ["https://staging.thinkadaptive.ai/api/auth/callback/socialai-studio-auth"],
+                    disabled: false,
+                    skipConsent: true,
+                    metadata: { external: true }
+                },
                 // {
                 //   clientId: "",
                 //   clientSecret: "",
                 //   name: "",
                 //   type: "web",
-                //   redirectURLs: ["https://yourdomain.com/api/auth/callback/socialai-studio-auth"],  // The value of 'socialai-studio-auth' must match with AUTH_PROVIDER_ID under web/frontend/.env
+                //   redirectUrls: ["https://yourdomain.com/api/auth/callback/socialai-studio-auth"],  // The value of 'socialai-studio-auth' must match with AUTH_PROVIDER_ID under web/frontend/.env
                 //   disabled: false,
                 //   skipConsent: true,
                 //   metadata: { external: true }
                 // },
             ],
             metadata: {
-                issuer: process.env.AUTH_BASE_URL,
+                // Discovery issuer should match the JWT issuer (origin only)
+                issuer: new URL(process.env.AUTH_BASE_URL as string).origin,
             },
         }),
     ],

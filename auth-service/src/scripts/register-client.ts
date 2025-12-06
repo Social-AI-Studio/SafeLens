@@ -126,7 +126,7 @@ async function register() {
     try {
         await db.insert(oauthApplications).values({
             name: args.name,
-            redirectURLs: redirectString,
+            redirectUrls: redirectString,
             type: args.type || "web",
             clientId,
             clientSecret,

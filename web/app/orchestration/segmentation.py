@@ -200,14 +200,17 @@ def load_vit(model_name: str, device: str) -> Tuple[ViTImageProcessor, ViTModel]
     Returns:
         Tuple of (processor, model)
     """
-    cache_key = f"{model_name}_{device}"
+    cache_key = f"{model_name}_{device}_fp16" if device.startswith("cuda") else f"{model_name}_{device}_fp32"
     
     if cache_key not in _vit_cache:
         logger.info(f"Loading ViT model {model_name} on {device}")
         try:
             processor = ViTImageProcessor.from_pretrained(model_name)
             model = ViTModel.from_pretrained(model_name)
-            model = model.to(device)
+            if device.startswith("cuda"):
+                model = model.to(device).half()
+            else:
+                model = model.to(device)
             model.eval()
             _vit_cache[cache_key] = (processor, model)
             logger.info(f"Successfully loaded ViT model")
@@ -226,7 +229,8 @@ def find_visual_boundaries(
     vit_model: ViTModel,
     sampling_interval_sec: float = 2.0,
     batch_size: int = 8,
-    threshold: float = 0.85
+    threshold: float = 0.85,
+    max_visual_frames: Optional[int] = None,
 ) -> List[float]:
     """
     Find visual scene boundaries using ViT embeddings.
@@ -263,6 +267,14 @@ def find_visual_boundaries(
         while current_time < end:
             sample_times.append(current_time)
             current_time += sampling_interval_sec
+
+        if max_visual_frames and len(sample_times) > max_visual_frames:
+            step = (end - start) / max_visual_frames
+            sample_times = [start + i * step for i in range(max_visual_frames)]
+            sample_times = [t for t in sample_times if start <= t < end]
+            logger.info(
+                f"Capping visual sampling to {len(sample_times)} frames (interval ~{step:.2f}s)"
+            )
             
         if len(sample_times) < 2:
             logger.info("Not enough samples for boundary detection")
@@ -303,7 +315,8 @@ def find_visual_boundaries(
                 
                 # Preprocess batch
                 inputs = image_processor(images=batch_frames, return_tensors="pt")
-                inputs = {k: v.to(device) for k, v in inputs.items()}
+                target_dtype = next(vit_model.parameters()).dtype
+                inputs = {k: v.to(device=device, dtype=target_dtype) for k, v in inputs.items()}
                 
                 # Get embeddings
                 outputs = vit_model(**inputs)
@@ -344,7 +357,8 @@ def split_long_segment(
     transcript: List[Dict],
     image_processor: ViTImageProcessor,
     vit_model: ViTModel,
-    cfg: SegmentationConfig
+    cfg: SegmentationConfig,
+    visual_cache: Optional[Dict[Tuple[float, float], List[float]]] = None,
 ) -> List[Dict]:
     """
     Split a segment that exceeds maximum length.
@@ -371,12 +385,27 @@ def split_long_segment(
     
     # Find candidate boundaries
     candidates = []
-    
-    # Add visual boundaries
-    visual_boundaries = find_visual_boundaries(
-        video_path, start, end, image_processor, vit_model,
-        cfg.sample_interval_sec, cfg.batch_size, cfg.scene_threshold
-    )
+
+    cache_key = (round(start, 3), round(end, 3))
+    visual_boundaries: List[float]
+    if visual_cache is not None and cache_key in visual_cache:
+        visual_boundaries = visual_cache[cache_key]
+        logger.info(f"Using cached visual boundaries for span {cache_key}")
+    else:
+        visual_boundaries = find_visual_boundaries(
+            video_path,
+            start,
+            end,
+            image_processor,
+            vit_model,
+            cfg.sample_interval_sec,
+            cfg.batch_size,
+            cfg.scene_threshold,
+            cfg.max_visual_frames,
+        )
+        if visual_cache is not None:
+            visual_cache[cache_key] = visual_boundaries
+
     candidates.extend(visual_boundaries)
     
     # Add transcript segment boundaries that fall within this segment
@@ -497,7 +526,8 @@ def merge_tiny_segments(
     transcript: List[Dict],
     image_processor: ViTImageProcessor,
     vit_model: ViTModel,
-    cfg: SegmentationConfig
+    cfg: SegmentationConfig,
+    visual_cache: Optional[Dict[Tuple[float, float], List[float]]] = None,
 ) -> List[Dict]:
     """
     Merge segments that are too short.
@@ -545,7 +575,7 @@ def merge_tiny_segments(
                 # If merged segment is too long, split it again
                 if merged_duration > cfg.max_len_sec:
                     split_segments = split_long_segment(
-                        merged_seg, video_path, transcript, image_processor, vit_model, cfg
+                        merged_seg, video_path, transcript, image_processor, vit_model, cfg, visual_cache
                     )
                     result.extend(split_segments)
                 else:
@@ -588,6 +618,9 @@ def process_segments(
         logger.warning("No transcript segments provided")
         return []
     
+    # Per-run cache for visual boundaries to avoid recomputing on the same spans
+    visual_cache: Dict[Tuple[float, float], List[float]] = {}
+
     # Load ViT model
     try:
         image_processor, vit_model = load_vit(cfg.vit_model, cfg.device)
@@ -646,7 +679,7 @@ def process_segments(
                 duration = seg['end'] - seg['start']
                 if duration > cfg.max_len_sec:
                     split_result = split_long_segment(
-                        seg, video_path, transcript_segments, image_processor, vit_model, cfg
+                        seg, video_path, transcript_segments, image_processor, vit_model, cfg, visual_cache
                     )
                     split_segments.extend(split_result)
                 else:
@@ -665,7 +698,7 @@ def process_segments(
     # Final merge pass for tiny segments
     if 'image_processor' in locals() and 'vit_model' in locals():
         segments = merge_tiny_segments(
-            segments, video_path, transcript_segments, image_processor, vit_model, cfg
+            segments, video_path, transcript_segments, image_processor, vit_model, cfg, visual_cache
         )
     
     # Final validation and cleanup

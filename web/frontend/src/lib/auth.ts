@@ -33,7 +33,7 @@ const hasStringId = (u: unknown): u is User & { id: string } =>
 
 // Backend OIDC base under NextAuth (points to /api/auth)
 const api_base = env.AUTH_ISSUER_URL;
-// Provider `iss` claim is the origin
+// Provider `iss` claim is the origin (auth-service now issues tokens with origin issuer)
 const issuer = AUTH_ISSUER_ORIGIN;
 
 export const authConfig: NextAuthConfig = {

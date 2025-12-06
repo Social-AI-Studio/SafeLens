@@ -3,16 +3,15 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import VideoPlayer from "@/components/VideoPlayer";
-import AnalysisResults from "@/components/AnalysisResults";
+import { authFetch } from "@/lib/authFetch";
+import VidstackPlayer from "@/components/VidstackPlayer";
+import InspectorPanel from "@/components/InspectorPanel";
 import ClusteredAnalysisData from "@/components/ClusteredAnalysisData";
-import EventExplanation from "@/components/EventExplanation";
-import { clusterHarmfulEvents, createSingleEventCluster } from "@/utils/clustering";
-import type { ClusteringConfig, ClusteredHarmfulContent } from "@/utils/clustering";
+import { clusterHarmfulEvents } from "@/utils/clustering";
+import type { ClusteringConfig } from "@/utils/clustering";
 import type { AnalysisData, HarmfulContent, TranscriptionWord } from "@/types/analysis";
 import { PlayerProvider, usePlayer } from "@/context/PlayerContext";
+import type { MediaPlayerInstance } from "@vidstack/react";
 
 function parseToSeconds(hms: string): number {
     if (!hms || typeof hms !== "string") return 0;
@@ -38,7 +37,6 @@ function VideoAnalysisContent() {
     const params = useParams();
     const router = useRouter();
     const { data: session, status } = useSession();
-    const { setPlayer } = usePlayer();
     const videoId = useMemo(() => {
         return Array.isArray(params.videoId)
             ? params.videoId[0]
@@ -50,17 +48,7 @@ function VideoAnalysisContent() {
     }, [videoId]);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [analysisData, setAnalysisData] = useState<AnalysisData | null>(null);
-    const [videoPlayer, setVideoPlayer] = useState<any>(null);
-    const [selectedEvent, setSelectedEvent] = useState<HarmfulContent | null>(null);
-    const [clusterPanelHeight, setClusterPanelHeight] = useState<number | null>(null);
-    const [clusterBoxMetrics, setClusterBoxMetrics] = useState<{
-        height: number;
-        top: number;
-    } | null>(null);
-    const eventBoxRef = useRef<HTMLDivElement | null>(null);
-    const [eventTop, setEventTop] = useState<number | null>(null);
-    const [eventHeight, setEventHeight] = useState<number | null>(null);
-
+    const [videoPlayer, setVideoPlayer] = useState<MediaPlayerInstance | null>(null);
     const hasStartedAnalysisRef = useRef(false);
 
     const [clusteringConfig, setClusteringConfig] = useState<ClusteringConfig>({
@@ -69,30 +57,18 @@ function VideoAnalysisContent() {
         minimumConfidence: 0.1,
     });
 
-    // Format time in xx:xx format
-    const formatTime = (seconds: number) => {
-        const mins = Math.floor(seconds / 60);
-        const secs = Math.floor(seconds % 60);
-        return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-    };
+    const { seekTo } = usePlayer();
 
     const handlePlayerReady = useCallback(
-        (player: any) => {
+        (player: MediaPlayerInstance) => {
             setVideoPlayer(player);
-            setPlayer(player);
         },
-        [setPlayer],
+        [],
     );
 
-    const seekToTimestamp = (timestamp: number) => {
-        if (videoPlayer) {
-            videoPlayer.currentTime(timestamp);
-            if (videoPlayer.paused()) {
-                // Optionally start playing
-                // videoPlayer.play();
-            }
-        }
-    };
+    const seekToTimestamp = useCallback((timestamp: number) => {
+        seekTo(timestamp);
+    }, [seekTo]);
 
     const transformBackendData = useCallback((backendData: any): AnalysisData => {
         if (!backendData || typeof backendData !== "object") {
@@ -205,14 +181,14 @@ function VideoAnalysisContent() {
     }, []);
 
     const checkVideoStatus = useCallback(async (videoId: string) => {
-        const statusResponse = await fetch(`/api/analyze/${videoId}/status`);
+        const statusResponse = await authFetch(`/api/analyze/${videoId}/status`);
         if (!statusResponse.ok) throw new Error("Failed to check status");
         return statusResponse.json();
     }, []);
 
     const fetchResults = useCallback(
         async (videoId: string) => {
-            const resultsResponse = await fetch(`/api/analyze/${videoId}/results`);
+            const resultsResponse = await authFetch(`/api/analyze/${videoId}/results`);
             if (!resultsResponse.ok) throw new Error("Failed to fetch results");
 
             const resultsData = await resultsResponse.json();
@@ -284,7 +260,7 @@ function VideoAnalysisContent() {
                         return;
 
                     default: // 'pending' or other states
-                        const triggerResponse = await fetch(`/api/analyze/${videoId}`, {
+                        const triggerResponse = await authFetch(`/api/analyze/${videoId}`, {
                             method: "POST",
                         });
                         if (!triggerResponse.ok)
@@ -302,7 +278,7 @@ function VideoAnalysisContent() {
                 setIsAnalyzing(false);
             }
         },
-        [checkVideoStatus, fetchResults, pollForAnalysis],
+        [checkVideoStatus, fetchResults, pollForAnalysis, status, session],
     );
 
     useEffect(() => {
@@ -349,106 +325,52 @@ function VideoAnalysisContent() {
         }));
     }, [currentClusteredData]);
 
-    useEffect(() => {
-        if (!currentClusteredData.length) {
-            setClusterPanelHeight(null);
-            setClusterBoxMetrics(null);
-        }
-    }, [currentClusteredData.length]);
-
-    // Observe EventExplanation card position and height
-    useEffect(() => {
-        const el = eventBoxRef.current;
-        if (!el) return;
-        const compute = () => {
-            const rect = el.getBoundingClientRect();
-            setEventTop(rect.top + (window.scrollY || window.pageYOffset));
-            setEventHeight(rect.height);
-        };
-        compute();
-        const ro = new ResizeObserver(() => compute());
-        ro.observe(el);
-        window.addEventListener("resize", compute);
-        window.addEventListener("scroll", compute, { passive: true });
-        return () => {
-            ro.disconnect();
-            window.removeEventListener("resize", compute);
-            window.removeEventListener("scroll", compute);
-        };
-    }, []);
-
-    // Compute height to align bottoms: cluster.height - (eventTop - cluster.top)
-    const matchedHeightPx = useMemo(() => {
-        if (!clusterBoxMetrics || eventTop == null)
-            return clusterPanelHeight ?? undefined;
-        const delta = eventTop - clusterBoxMetrics.top;
-        const h = clusterBoxMetrics.height - delta;
-        return Math.max(0, Math.min(clusterBoxMetrics.height, h));
-    }, [clusterBoxMetrics, eventTop, clusterPanelHeight]);
+    // Removed old resize observer logic for height matching
 
     if (!videoId) {
         return <div>Loading...</div>;
     }
 
     return (
-        <div className="container mx-auto px-4 py-8">
-            <main className="container mx-auto px-4 py-8">
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                    {/* Left Column - Video Section */}
-                    <div className="lg:col-span-2 space-y-6">
-                        <div className="space-y-4">
-                            <div className="flex justify-between items-center">
-                                <div className="flex items-center gap-3">
-                                    <h2 className="text-lg font-semibold">
-                                        Video Analysis
-                                    </h2>
-                                    {analysisData?.analysisModel && (
-                                        <Badge variant="secondary" className="text-xs">
-                                            {analysisData.analysisModel}
-                                        </Badge>
-                                    )}
-                                </div>
-                                <Button
-                                    variant="outline"
-                                    onClick={() => router.push("/")}
-                                >
-                                    Upload New Video
-                                </Button>
-                            </div>
-
-                            <VideoPlayer
-                                src={videoSrc}
-                                harmfulMarkers={harmfulMarkers}
-                                onReady={handlePlayerReady}
-                            />
-
-                            <ClusteredAnalysisData
-                                clusteredData={currentClusteredData}
-                                onSeekToTimestamp={seekToTimestamp}
-                                onEventSelect={setSelectedEvent}
-                                onHeightChange={setClusterPanelHeight}
-                                onBoxMetricsChange={setClusterBoxMetrics}
-                            />
-                        </div>
-                    </div>
-
-                    {/* Right Column - Analysis Results (Summary Only) */}
-                    <div className="lg:col-span-1 space-y-4">
-                        <AnalysisResults
-                            summary={analysisData?.summary}
-                            transcription={analysisData?.transcription}
-                            transcriptionWords={analysisData?.transcriptionWords}
-                            isLoading={isAnalyzing || !analysisData}
+        <div
+            className="overflow-hidden flex flex-col"
+            style={{ height: "calc(100vh - var(--header-height, 76px))" }}
+        >
+            <main className="flex-1 grid grid-cols-12 gap-6 px-4 sm:px-6 lg:px-10 py-6 h-full min-h-0 overflow-hidden">
+                {/* Left Column - Video Section (66%) */}
+                <div className="col-span-8 flex flex-col space-y-4 h-full overflow-hidden min-h-0">
+                    {/* Video Player Container */}
+                    <div
+                        className="bg-black rounded-lg overflow-hidden relative shrink-0"
+                        style={{
+                            height: "var(--video-height)",
+                            maxHeight: "calc(100vh - var(--header-height, 76px) - 220px)",
+                        }}
+                    >
+                        <VidstackPlayer
+                            src={videoSrc}
+                            harmfulSegments={harmfulMarkers}
+                            onReady={handlePlayerReady}
                         />
-                        {currentClusteredData.length > 0 && (
-                            <div ref={eventBoxRef}>
-                                <EventExplanation
-                                    selectedEvent={selectedEvent}
-                                    matchedMaxPx={matchedHeightPx}
-                                />
-                            </div>
-                        )}
                     </div>
+
+                    {/* Harmful Segments List (Scrollable Playlist) */}
+                    <div className="flex-1 overflow-y-auto min-h-0">
+                        <ClusteredAnalysisData
+                            clusteredData={currentClusteredData}
+                            onSeekToTimestamp={seekToTimestamp}
+                            analysisModel={analysisData?.analysisModel}
+                        />
+                    </div>
+                </div>
+
+                {/* Right Column - Inspector Panel (33%) */}
+                <div className="col-span-4 h-full bg-card rounded-lg border shadow-sm p-4 min-h-0 overflow-hidden">
+                    <InspectorPanel 
+                        harmfulEvents={analysisData?.harmfulContent || []}
+                        transcriptionWords={analysisData?.transcriptionWords}
+                        transcriptionFull={analysisData?.transcription}
+                    />
                 </div>
             </main>
         </div>
@@ -459,6 +381,38 @@ export default function VideoAnalysisPage() {
     return (
         <PlayerProvider>
             <VideoAnalysisContent />
+            <style jsx global>{`
+                :root {
+                    --header-height: 76px;
+                    --video-height: clamp(
+                        360px,
+                        calc((100vh - var(--header-height)) * 0.55),
+                        620px
+                    );
+                }
+
+                @media (min-width: 1200px) {
+                    :root {
+                        --header-height: 80px;
+                        --video-height: clamp(
+                            420px,
+                            calc((100vh - var(--header-height)) * 0.6),
+                            660px
+                        );
+                    }
+                }
+
+                @media (min-width: 1440px) {
+                    :root {
+                        --header-height: 84px;
+                        --video-height: clamp(
+                            500px,
+                            calc((100vh - var(--header-height)) * 0.64),
+                            740px
+                        );
+                    }
+                }
+            `}</style>
         </PlayerProvider>
     );
 }

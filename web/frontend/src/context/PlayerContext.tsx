@@ -1,14 +1,21 @@
 "use client";
 
 import React, { createContext, useCallback, useContext, useMemo, useRef } from "react";
+import type { MediaPlayerInstance } from "@vidstack/react";
 
 type TimeListener = (t: number) => void;
+type DurationListener = (d: number) => void;
 
 export interface PlayerContextValue {
-    playerRef: React.MutableRefObject<any | null>;
-    setPlayer: (player: any | null) => void;
+    playerRef: React.MutableRefObject<MediaPlayerInstance | null>;
+    setPlayer: (player: MediaPlayerInstance | null) => void;
     seekTo: (t: number) => void;
+    // For components that need to subscribe to time updates (legacy support)
     subscribeTime: (fn: TimeListener) => () => void;
+    subscribeDuration: (fn: DurationListener) => () => void;
+    // Direct time/duration fan-out for the player to call
+    fanOutTime: (t: number) => void;
+    fanOutDuration: (d: number) => void;
 }
 
 const noop = () => {};
@@ -18,20 +25,21 @@ const defaultValue: PlayerContextValue = {
     setPlayer: noop,
     seekTo: noop,
     subscribeTime: () => noop,
+    subscribeDuration: () => noop,
+    fanOutTime: noop,
+    fanOutDuration: noop,
 };
 
 const PlayerContext = createContext<PlayerContextValue>(defaultValue);
 
 export function PlayerProvider({ children }: { children: React.ReactNode }) {
-    const playerRef = useRef<any | null>(null);
+    const playerRef = useRef<MediaPlayerInstance | null>(null);
     const listenersRef = useRef<Set<TimeListener>>(new Set());
-    const attachedPlayerRef = useRef<any | null>(null);
-    const handlerRef = useRef<(() => void) | null>(null);
+    const durationListenersRef = useRef<Set<DurationListener>>(new Set());
+    const lastDurationRef = useRef<number>(0);
     const rafRef = useRef<number | null>(null);
-    const rafLoopRef = useRef<number | null>(null);
 
     const fanOutTime = useCallback((t: number) => {
-        // Coalesce multiple calls into next animation frame for smoother updates
         if (rafRef.current != null) {
             cancelAnimationFrame(rafRef.current);
         }
@@ -46,129 +54,49 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         });
     }, []);
 
-    const stopRafLoop = useCallback(() => {
-        if (rafLoopRef.current != null) {
-            cancelAnimationFrame(rafLoopRef.current);
-            rafLoopRef.current = null;
+    const fanOutDuration = useCallback((d: number) => {
+        if (d > 0 && d !== lastDurationRef.current) {
+            lastDurationRef.current = d;
+            durationListenersRef.current.forEach((fn) => {
+                try {
+                    fn(d);
+                } catch {
+                    // ignore listener errors
+                }
+            });
         }
     }, []);
 
-    const startRafLoop = useCallback(
-        (player: any) => {
-            stopRafLoop();
-            const loop = () => {
-                try {
-                    // Only fan-out if there are subscribers
-                    if (
-                        listenersRef.current.size > 0 &&
-                        player &&
-                        typeof player.currentTime === "function"
-                    ) {
-                        const t = player.currentTime();
-                        listenersRef.current.forEach((fn) => {
-                            try {
-                                fn(t);
-                            } catch {}
-                        });
-                    }
-                } catch {
-                    // ignore polling errors
-                }
-                rafLoopRef.current = requestAnimationFrame(loop);
-            };
-            rafLoopRef.current = requestAnimationFrame(loop);
-        },
-        [stopRafLoop],
-    );
+    const setPlayer = useCallback((player: MediaPlayerInstance | null) => {
+        playerRef.current = player;
+    }, []);
 
-    const detachFromPlayer = useCallback(() => {
-        const prev = attachedPlayerRef.current;
-        if (prev && handlerRef.current) {
+    const seekTo = useCallback((t: number) => {
+        const p = playerRef.current;
+        if (p) {
             try {
-                prev.off("timeupdate", handlerRef.current);
-                prev.off("seeked", handlerRef.current as any);
-                prev.off("ratechange", handlerRef.current as any);
-                prev.off("playing", handlerRef.current as any);
-                prev.off("loadedmetadata", handlerRef.current as any);
+                p.currentTime = t;
+                fanOutTime(t);
             } catch {
-                // ignore detach errors
+                // ignore seek errors
             }
         }
-        stopRafLoop();
-        attachedPlayerRef.current = null;
-        handlerRef.current = null;
-    }, [stopRafLoop]);
-
-    const attachToPlayer = useCallback(
-        (player: any | null) => {
-            detachFromPlayer();
-            if (!player) return;
-
-            const onTimeUpdate = () => {
-                try {
-                    const t =
-                        typeof player.currentTime === "function"
-                            ? player.currentTime()
-                            : 0;
-                    fanOutTime(t);
-                } catch {
-                    // ignore errors from player
-                }
-            };
-            handlerRef.current = onTimeUpdate;
-            try {
-                player.on("timeupdate", onTimeUpdate);
-                // Also respond immediately to important state changes with same handler for easy detach
-                try {
-                    player.on("seeked", onTimeUpdate);
-                } catch {}
-                try {
-                    player.on("ratechange", onTimeUpdate);
-                } catch {}
-                try {
-                    player.on("playing", onTimeUpdate);
-                } catch {}
-                try {
-                    player.on("loadedmetadata", onTimeUpdate);
-                } catch {}
-                attachedPlayerRef.current = player;
-                // Start high-frequency polling loop to reduce perceived latency
-                startRafLoop(player);
-            } catch {
-                // ignore attach errors
-            }
-        },
-        [detachFromPlayer, fanOutTime, startRafLoop],
-    );
-
-    const setPlayer = useCallback(
-        (player: any | null) => {
-            playerRef.current = player;
-            attachToPlayer(player);
-        },
-        [attachToPlayer],
-    );
-
-    const seekTo = useCallback(
-        (t: number) => {
-            const p = playerRef.current;
-            if (p && typeof p.currentTime === "function") {
-                try {
-                    p.currentTime(t);
-                    // Immediately fan-out time for instant visual feedback
-                    fanOutTime(t);
-                } catch {
-                    // ignore seek errors
-                }
-            }
-        },
-        [fanOutTime],
-    );
+    }, [fanOutTime]);
 
     const subscribeTime = useCallback((fn: TimeListener) => {
         listenersRef.current.add(fn);
         return () => {
             listenersRef.current.delete(fn);
+        };
+    }, []);
+
+    const subscribeDuration = useCallback((fn: DurationListener) => {
+        durationListenersRef.current.add(fn);
+        if (lastDurationRef.current > 0) {
+            fn(lastDurationRef.current);
+        }
+        return () => {
+            durationListenersRef.current.delete(fn);
         };
     }, []);
 
@@ -178,8 +106,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             setPlayer,
             seekTo,
             subscribeTime,
+            subscribeDuration,
+            fanOutTime,
+            fanOutDuration,
         }),
-        [setPlayer, seekTo, subscribeTime],
+        [setPlayer, seekTo, subscribeTime, subscribeDuration, fanOutTime, fanOutDuration],
     );
 
     return <PlayerContext.Provider value={value}>{children}</PlayerContext.Provider>;
