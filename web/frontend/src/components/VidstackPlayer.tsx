@@ -61,6 +61,7 @@ interface VidstackPlayerProps {
     src?: string;
     harmfulSegments?: HarmfulSegment[];
     onReady?: (player: MediaPlayerInstance) => void;
+    expectedDuration?: number; // optional duration hint from backend (seconds)
 }
 
 const GAP_PX = 3;
@@ -80,18 +81,27 @@ function getSegmentColor(confidence: number): string {
 
 interface SegmentedTimelineProps {
     segments: HarmfulSegment[];
+    expectedDuration?: number;
 }
 
-function SegmentedTimeline({ segments }: SegmentedTimelineProps) {
-    const duration = useMediaState("duration");
+function SegmentedTimeline({ segments, expectedDuration, onSeek }: SegmentedTimelineProps & { onSeek?: (time: number) => void }) {
+    const mediaDuration = useMediaState("duration");
     const currentTime = useMediaState("currentTime");
     const remote = useMediaRemote();
     const containerRef = useRef<HTMLDivElement>(null);
     const [hoveredSegment, setHoveredSegment] = useState<HarmfulSegment | null>(null);
     const [hoverX, setHoverX] = useState(0);
 
+    // Prefer media duration; allow caller to provide backend duration as a hint
+    const effectiveDuration = useMemo(() => {
+        const md = mediaDuration && isFinite(mediaDuration) ? mediaDuration : 0;
+        const ed = expectedDuration && isFinite(expectedDuration) ? expectedDuration : 0;
+        return Math.max(md, ed);
+    }, [mediaDuration, expectedDuration]);
+
     // Build chapters from segments
     const chapters = useMemo(() => {
+        const duration = effectiveDuration;
         if (!duration || duration <= 0) return [];
 
         const sorted = [...segments].sort((a, b) => a.time - b.time);
@@ -129,29 +139,37 @@ function SegmentedTimeline({ segments }: SegmentedTimelineProps) {
         }
 
         return result;
-    }, [duration, segments]);
+    }, [effectiveDuration, segments]);
 
     const handleClick = useCallback(
         (e: React.MouseEvent) => {
-            if (!containerRef.current || !duration || duration <= 0) return;
+            if (!containerRef.current || !effectiveDuration || effectiveDuration <= 0)
+                return;
 
             const rect = containerRef.current.getBoundingClientRect();
             const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
             const percent = x / rect.width;
-            const seekTime = percent * duration;
-            remote.seek(seekTime);
+            const seekTime = percent * effectiveDuration;
+
+            // Use callback if provided, otherwise fall back to remote.seek
+            if (onSeek) {
+                onSeek(seekTime);
+            } else {
+                remote.seek(seekTime);
+            }
         },
-        [duration, remote]
+        [effectiveDuration, remote, onSeek]
     );
 
     const handleMouseMove = useCallback(
         (e: React.MouseEvent) => {
-            if (!containerRef.current || !duration || duration <= 0) return;
+            if (!containerRef.current || !effectiveDuration || effectiveDuration <= 0)
+                return;
 
             const rect = containerRef.current.getBoundingClientRect();
             const x = e.clientX - rect.left;
             const percent = x / rect.width;
-            const hoverTime = percent * duration;
+            const hoverTime = percent * effectiveDuration;
             setHoverX(e.clientX);
 
             // Find if hovering over a harmful segment
@@ -163,14 +181,27 @@ function SegmentedTimeline({ segments }: SegmentedTimelineProps) {
             }
             setHoveredSegment(null);
         },
-        [duration, chapters]
+        [effectiveDuration, chapters]
     );
 
     // Calculate progress percentage
-    const progressPercent = duration && duration > 0 ? (currentTime / duration) * 100 : 0;
+    const durationForProgress = effectiveDuration > 0 ? effectiveDuration : mediaDuration;
+    const progressPercent =
+        durationForProgress && durationForProgress > 0
+            ? Math.min(100, (currentTime / durationForProgress) * 100)
+            : 0;
 
-    if (!duration || duration <= 0) {
-        return <div className="w-full h-2 bg-white/20 rounded-full" />;
+    if (!effectiveDuration || effectiveDuration <= 0) {
+        // Show full-width skeleton bar until duration is available
+        // Uses the same styling as the real timeline so there's no visual jump
+        return (
+            <div className="relative w-full group/timeline">
+                <div className="relative w-full h-1.5 bg-white/30 rounded-full overflow-hidden transition-all duration-150 group-hover/timeline:h-3">
+                    {/* Subtle pulse animation to indicate loading */}
+                    <div className="absolute inset-0 bg-white/10 animate-pulse" />
+                </div>
+            </div>
+        );
     }
 
     // If no harmful segments, show simple progress bar
@@ -202,7 +233,7 @@ function SegmentedTimeline({ segments }: SegmentedTimelineProps) {
                 style={{ gap: `${GAP_PX}px` }}
             >
                 {chapters.map((chapter, idx) => {
-                    const widthPercent = ((chapter.end - chapter.start) / duration) * 100;
+                    const widthPercent = ((chapter.end - chapter.start) / effectiveDuration) * 100;
                     
                     // Calculate fill percentage for this specific chapter
                     let fillPercent = 0;
@@ -271,13 +302,92 @@ function SegmentedTimeline({ segments }: SegmentedTimelineProps) {
     );
 }
 
-function PlayerControls({ segments }: { segments: HarmfulSegment[] }) {
+// Spinner icon for seeking state
+const SpinnerIcon = () => (
+    <svg className="animate-spin w-12 h-12" viewBox="0 0 24 24" fill="none">
+        <circle
+            className="opacity-25"
+            cx="12"
+            cy="12"
+            r="10"
+            stroke="currentColor"
+            strokeWidth="4"
+        />
+        <path
+            className="opacity-75"
+            fill="currentColor"
+            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+        />
+    </svg>
+);
+
+function PlayerControls({
+    segments,
+    expectedDuration,
+    playerRef,
+}: {
+    segments: HarmfulSegment[];
+    expectedDuration?: number;
+    playerRef: React.RefObject<MediaPlayerInstance | null>;
+}) {
     const isPaused = useMediaState("paused");
     const currentTime = useMediaState("currentTime");
-    const duration = useMediaState("duration");
+    const mediaDuration = useMediaState("duration");
     const muted = useMediaState("muted");
     const fullscreen = useMediaState("fullscreen");
+    const seeking = useMediaState("seeking");
+    const waiting = useMediaState("waiting");
     const remote = useMediaRemote();
+    const [pendingSeekTime, setPendingSeekTime] = useState<number | null>(null);
+
+    const handleSeek = useCallback(async (time: number) => {
+        const player = playerRef.current;
+        if (!player) return;
+
+        const wasPaused = player.paused;
+        const hasNeverPlayed = player.currentTime === 0 && wasPaused;
+
+        // Track the pending seek target
+        setPendingSeekTime(time);
+
+        // Set the target time
+        player.currentTime = time;
+
+        // If video hasn't started playing yet, we need to briefly start playback
+        // to force the browser to load data at the seek position, then pause again
+        if (hasNeverPlayed && time > 0) {
+            try {
+                // Start playback to trigger loading
+                await player.play();
+                // Small delay to let the seek take effect
+                await new Promise((resolve) => setTimeout(resolve, 50));
+                // Pause again since user hadn't started playback
+                await player.pause();
+                // Re-apply the seek time in case it drifted
+                player.currentTime = time;
+            } catch {
+                // Play was blocked (e.g., autoplay policy) - that's fine,
+                // the seek should still work once user clicks play
+            }
+        }
+    }, [playerRef]);
+
+    // Clear pending seek when we've reached the target (within tolerance) and not actively seeking/waiting
+    useEffect(() => {
+        if (pendingSeekTime !== null && !seeking && !waiting && Math.abs(currentTime - pendingSeekTime) < 0.5) {
+            setPendingSeekTime(null);
+        }
+    }, [currentTime, pendingSeekTime, seeking, waiting]);
+
+    // Show loading when actively seeking, waiting for data, or have a pending seek target
+    const showSeekingOverlay = seeking || waiting || pendingSeekTime !== null;
+
+    const effectiveDuration = useMemo(() => {
+        const md = mediaDuration && isFinite(mediaDuration) ? mediaDuration : 0;
+        const ed =
+            expectedDuration && isFinite(expectedDuration) ? expectedDuration : 0;
+        return Math.max(md, ed);
+    }, [mediaDuration, expectedDuration]);
 
     const handleVideoClick = useCallback(() => {
         if (isPaused) {
@@ -289,17 +399,30 @@ function PlayerControls({ segments }: { segments: HarmfulSegment[] }) {
 
     return (
         <>
+            {/* Seeking overlay */}
+            {showSeekingOverlay && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/40 z-20 pointer-events-none">
+                    <div className="text-white">
+                        <SpinnerIcon />
+                    </div>
+                </div>
+            )}
+
             {/* Click overlay for play/pause */}
-            <div 
-                className="absolute inset-0 cursor-pointer" 
+            <div
+                className="absolute inset-0 cursor-pointer"
                 onClick={handleVideoClick}
                 style={{ bottom: "80px" }} // Leave space for controls
             />
-            
+
             <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent px-4 pb-3 pt-12 opacity-0 group-hover:opacity-100 transition-opacity">
             {/* Timeline */}
             <div className="mb-3">
-                <SegmentedTimeline segments={segments} />
+                <SegmentedTimeline
+                    segments={segments}
+                    expectedDuration={expectedDuration}
+                    onSeek={handleSeek}
+                />
             </div>
 
             {/* Controls row */}
@@ -323,7 +446,7 @@ function PlayerControls({ segments }: { segments: HarmfulSegment[] }) {
 
                     {/* Time display */}
                     <span className="text-white text-sm font-mono">
-                        {formatTime(currentTime)} / {formatTime(duration)}
+                        {formatTime(currentTime)} / {formatTime(effectiveDuration)}
                     </span>
                 </div>
 
@@ -346,6 +469,7 @@ export default function VidstackPlayer({
     src,
     harmfulSegments = [],
     onReady,
+    expectedDuration,
 }: VidstackPlayerProps) {
     const playerRef = useRef<MediaPlayerInstance>(null);
     const { setPlayer, fanOutTime, fanOutDuration } = usePlayer();
@@ -381,6 +505,7 @@ export default function VidstackPlayer({
                 src={src}
                 crossOrigin
                 playsInline
+                preload="metadata"
                 className="w-full h-full !bg-black relative group"
                 onTimeUpdate={() => {
                     if (playerRef.current) {
@@ -394,7 +519,11 @@ export default function VidstackPlayer({
                 }}
             >
                 <MediaProvider className="w-full h-full [&>video]:w-full [&>video]:h-full [&>video]:object-contain" />
-                <PlayerControls segments={harmfulSegments} />
+                <PlayerControls
+                    segments={harmfulSegments}
+                    expectedDuration={expectedDuration}
+                    playerRef={playerRef}
+                />
             </MediaPlayer>
         </>
     );

@@ -14,6 +14,7 @@ from fastapi import (
     Header,
     BackgroundTasks,
     Form,
+    Request,
 )
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -230,8 +231,8 @@ async def get_video_info(video_id: str):
 
 @router.get("/videos/{video_id}/video.mp4")
 @router.head("/videos/{video_id}/video.mp4")
-async def serve_video(video_id: str):
-    """Serve video file for playback"""
+async def serve_video(video_id: str, request: Request):
+    """Serve video file for playback with proper range request support"""
     video_dir = UPLOAD_FOLDER.resolve() / video_id
     video_file = video_dir / "video.mp4"
 
@@ -244,10 +245,52 @@ async def serve_video(video_id: str):
             status_code=404, detail=f"Video file not found: {video_file}"
         )
 
+    file_size = video_file.stat().st_size
+    range_header = request.headers.get("range")
+
+    if range_header:
+        # Parse the range header (e.g., "bytes=0-1023")
+        range_match = range_header.replace("bytes=", "").split("-")
+        start = int(range_match[0]) if range_match[0] else 0
+        end = int(range_match[1]) if range_match[1] else file_size - 1
+
+        # Clamp values
+        start = max(0, start)
+        end = min(end, file_size - 1)
+        content_length = end - start + 1
+
+        def iter_file():
+            with open(video_file, "rb") as f:
+                f.seek(start)
+                remaining = content_length
+                chunk_size = 1024 * 1024  # 1MB chunks
+                while remaining > 0:
+                    chunk = f.read(min(chunk_size, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        from starlette.responses import StreamingResponse
+        return StreamingResponse(
+            iter_file(),
+            status_code=206,
+            media_type="video/mp4",
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(content_length),
+            },
+        )
+
+    # No range header - return full file
     return FileResponse(
-        str(video_file), 
+        str(video_file),
         media_type="video/mp4",
-        headers={"Accept-Ranges": "bytes"},
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+        },
     )
 
 
@@ -332,6 +375,7 @@ async def get_analysis_status(
         message=f"Analysis is {video.analysis_status}",
         started_at=video.uploaded_at,
         completed_at=None,
+        duration=video.duration,
     )
 
 
@@ -451,6 +495,7 @@ async def get_analysis_results(
                 "id": event.id,
                 "timestamp": event.timestamp,
                 "categories": json.loads(event.categories) if event.categories else [],
+                "factor_weights": json.loads(event.factor_weights) if getattr(event, "factor_weights", None) else None,
                 "verification_source": event.verification_source,
                 "explanation": event.explanation,
                 "confidence_score": event.confidence_score,

@@ -54,6 +54,7 @@ class AnalysisStatus(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error: Optional[str] = None
+    duration: Optional[float] = None  # Video duration in seconds for early timeline rendering
 
     class Config:
         json_encoders = {datetime: lambda v: v.isoformat()}

@@ -50,6 +50,7 @@ function VideoAnalysisContent() {
     const [analysisData, setAnalysisData] = useState<AnalysisData | null>(null);
     const [videoPlayer, setVideoPlayer] = useState<MediaPlayerInstance | null>(null);
     const hasStartedAnalysisRef = useRef(false);
+    const [earlyDuration, setEarlyDuration] = useState<number | undefined>(undefined);
 
     const [clusteringConfig, setClusteringConfig] = useState<ClusteringConfig>({
         gapThreshold: 2.5,
@@ -86,6 +87,12 @@ function VideoAnalysisContent() {
         const videoMetadata = safetyReport.video_metadata || {};
         const analysisModel =
             safetyReport.model_used || videoMetadata.analysis_model || "Unknown";
+        const videoDuration =
+            typeof videoMetadata.duration === "number"
+                ? videoMetadata.duration
+                : typeof backendData.duration === "number"
+                  ? backendData.duration
+                  : undefined;
 
         const harmfulContent: HarmfulContent[] = harmfulEvents.map((event: any) => {
             if (event && "segment_start" in event) {
@@ -97,6 +104,17 @@ function VideoAnalysisContent() {
                 const categories = Array.isArray(data.categories)
                     ? data.categories
                     : [];
+                const factorWeights = (() => {
+                    const fw = data.factor_weights;
+                    if (fw && typeof fw === "object") {
+                        return {
+                            visual: typeof fw.visual === "number" ? fw.visual : undefined,
+                            audio: typeof fw.audio === "number" ? fw.audio : undefined,
+                            text: typeof fw.text === "number" ? fw.text : undefined,
+                        };
+                    }
+                    return undefined;
+                })();
                 const description =
                     data.explanation || "Harmful content detected through AI analysis";
                 const method = Array.isArray(event.analysis_performed)
@@ -114,6 +132,7 @@ function VideoAnalysisContent() {
                     source: "multimodal",
                     detectionMethod: method,
                     categories,
+                    factorWeights,
                     rawData: event,
                 } as HarmfulContent;
             }
@@ -137,6 +156,23 @@ function VideoAnalysisContent() {
                 categories: Array.isArray(event.categories)
                     ? event.categories
                     : [event.categories || "harmful content"],
+                factorWeights:
+                    event.factor_weights && typeof event.factor_weights === "object"
+                        ? {
+                              visual:
+                                  typeof event.factor_weights.visual === "number"
+                                      ? event.factor_weights.visual
+                                      : undefined,
+                              audio:
+                                  typeof event.factor_weights.audio === "number"
+                                      ? event.factor_weights.audio
+                                      : undefined,
+                              text:
+                                  typeof event.factor_weights.text === "number"
+                                      ? event.factor_weights.text
+                                      : undefined,
+                          }
+                        : undefined,
                 rawData: event,
             } as HarmfulContent;
         });
@@ -177,13 +213,19 @@ function VideoAnalysisContent() {
             harmfulContent,
             analysisModel,
             transcriptionWords,
+            videoDuration,
         } as AnalysisData;
     }, []);
 
     const checkVideoStatus = useCallback(async (videoId: string) => {
         const statusResponse = await authFetch(`/api/analyze/${videoId}/status`);
         if (!statusResponse.ok) throw new Error("Failed to check status");
-        return statusResponse.json();
+        const statusData = await statusResponse.json();
+        // Extract duration early for timeline rendering
+        if (statusData.duration && typeof statusData.duration === "number") {
+            setEarlyDuration(statusData.duration);
+        }
+        return statusData;
     }, []);
 
     const fetchResults = useCallback(
@@ -351,6 +393,7 @@ function VideoAnalysisContent() {
                             src={videoSrc}
                             harmfulSegments={harmfulMarkers}
                             onReady={handlePlayerReady}
+                            expectedDuration={analysisData?.videoDuration ?? earlyDuration}
                         />
                     </div>
 
