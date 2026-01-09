@@ -5,8 +5,9 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { authClient } from "@/lib/auth-client";
 import { useSearchParams } from "next/navigation";
+import { Suspense } from "react";
 
-export default function LoginPage() {
+function SignUpContent() {
     const searchParams = useSearchParams();
 
     const handleGoogleSignIn = async () => {
@@ -71,5 +72,19 @@ export default function LoginPage() {
                 </div>
             </div>
         </div>
+    );
+}
+
+export default function LoginPage() {
+    return (
+        <Suspense
+            fallback={
+                <div className="flex items-center justify-center min-h-screen bg-background px-4">
+                    <div className="text-sm text-muted-foreground">Loading...</div>
+                </div>
+            }
+        >
+            <SignUpContent />
+        </Suspense>
     );
 }
