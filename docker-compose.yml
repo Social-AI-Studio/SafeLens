@@ -1,0 +1,237 @@
+services:
+    web:
+        build:
+            context: ./web
+            dockerfile: Dockerfile
+        image: safelens-web
+        ports:
+            - "8000:8000"
+        env_file:
+            - ./web/.env
+        environment:
+            WHISPER_DEVICE: "cuda"
+            WHISPER_COMPUTE_TYPE: "float16"
+            DATABASE_URL: "postgresql+psycopg://${WEB_DB_USER}:${WEB_DB_PASSWORD}@web_db:5432/${WEB_DB_NAME}"
+            QWEN_VLLM_BASE_URL: "http://qwen_router:8080/v1"
+            ANALYSIS_LLM_BACKEND: "http"
+            ANALYSIS_LLM_HTTP_URL: "http://llama_router:8080/v1"
+            QWEN_VLLM_MAX_INFLIGHT: "4"
+        gpus:
+            - driver: nvidia
+              device_ids: ["3"]
+              capabilities: [gpu]
+        volumes:
+            - videos_data:/app/videos
+        depends_on:
+            web_db:
+                condition: service_healthy
+        restart: unless-stopped
+        profiles:
+            - core
+
+    web_db:
+        image: postgres:17.5
+        environment:
+            POSTGRES_USER: ${WEB_DB_USER}
+            POSTGRES_PASSWORD: ${WEB_DB_PASSWORD}
+            POSTGRES_DB: ${WEB_DB_NAME}
+        ports:
+            - "5432:5432"
+        volumes:
+            - web_db_data:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U socialaistudio -d harmful_moderation"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+        restart: unless-stopped
+        profiles:
+            - core
+
+    auth_db:
+        image: postgres:17.5
+        environment:
+            POSTGRES_USER: ${AUTH_DB_USER}
+            POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD}
+            POSTGRES_DB: ${AUTH_DB_NAME}
+        ports:
+            - "5433:5432"
+        volumes:
+            - auth_db_data:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U socialaistudio -d socialai_auth"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+        restart: unless-stopped
+        profiles:
+            - core
+
+    vllm_llama:
+        image: vllm/vllm-openai:nightly
+        command:
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8192"
+            - "--model"
+            - "meta-llama/Meta-Llama-3-8B-Instruct"
+            - "--enable-lora"
+            - "--lora-modules"
+            - "SafeLens/llama-3-8b=/models/lora"
+        environment:
+            HF_TOKEN: ${HF_TOKEN}
+        gpus:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+        ports:
+            - "8192:8192"
+        volumes:
+            - ./web/lora_adapter:/models/lora:ro
+            - vllm_cache:/root/.cache/huggingface
+        restart: unless-stopped
+        profiles:
+            - gpu
+
+    vllm_qwen:
+        image: vllm/vllm-openai:nightly
+        command:
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8193"
+            - "--model"
+            - "${VLLM_QWEN_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}"
+            - "--trust-remote-code"
+            - "--max-model-len"
+            - "${VLLM_QWEN_MAX_MODEL_LEN:-8192}"
+            - "--gpu-memory-utilization"
+            - "${VLLM_QWEN_GPU_UTIL:-0.6}"
+            - "--tensor-parallel-size"
+            - "${VLLM_QWEN_TP:-1}"
+        environment:
+            HF_TOKEN: ${HF_TOKEN}
+        gpus:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+        ports:
+            - "8193:8193"
+        volumes:
+            - vllm_cache:/root/.cache/huggingface
+        healthcheck:
+            test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8193/v1/models', timeout=3)\""]
+            interval: 30s
+            timeout: 5s
+            retries: 5
+        restart: unless-stopped
+        profiles:
+            - gpu
+
+    vllm_qwen_2:
+        image: vllm/vllm-openai:nightly
+        command:
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8194"
+            - "--model"
+            - "${VLLM_QWEN_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}"
+            - "--trust-remote-code"
+            - "--max-model-len"
+            - "${VLLM_QWEN_MAX_MODEL_LEN:-8192}"
+            - "--gpu-memory-utilization"
+            - "${VLLM_QWEN_GPU_UTIL:-0.6}"
+            - "--tensor-parallel-size"
+            - "${VLLM_QWEN_TP:-1}"
+        environment:
+            HF_TOKEN: ${HF_TOKEN}
+        gpus:
+            - driver: nvidia
+              device_ids: ["2"]
+              capabilities: [gpu]
+        ports:
+            - "8194:8194"
+        volumes:
+            - vllm_cache:/root/.cache/huggingface
+        healthcheck:
+            test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8194/v1/models', timeout=3)\""]
+            interval: 30s
+            timeout: 5s
+            retries: 5
+        restart: unless-stopped
+        profiles:
+            - gpu
+
+    qwen_router:
+        build:
+            context: ./qwen-router
+            dockerfile: Dockerfile
+        image: safelens-qwen-router
+        environment:
+            LLM_ROUTER_BACKENDS: "http://vllm_qwen:8193,http://vllm_qwen_2:8194"
+            LLM_ROUTER_MAX_RETRIES: "1"
+            LLM_ROUTER_COOLDOWN_SEC: "5"
+            LLM_ROUTER_EWMA_ALPHA: "0.2"
+            LLM_ROUTER_LATENCY_WEIGHT: "0"
+        ports:
+            - "8080:8080"
+        depends_on:
+            vllm_qwen:
+                condition: service_started
+        restart: unless-stopped
+        profiles:
+            - gpu
+
+    llama_router:
+        image: safelens-qwen-router
+        environment:
+            LLM_ROUTER_BACKENDS: "http://vllm_llama:8192"
+            LLM_ROUTER_MAX_RETRIES: "1"
+            LLM_ROUTER_COOLDOWN_SEC: "5"
+            LLM_ROUTER_EWMA_ALPHA: "0.2"
+            LLM_ROUTER_LATENCY_WEIGHT: "0.001"
+        ports:
+            - "8081:8080"
+        depends_on:
+            vllm_llama:
+                condition: service_started
+        restart: unless-stopped
+        profiles:
+            - gpu
+
+    cloudflared_web:
+        image: cloudflare/cloudflared:latest
+        command:
+            - "tunnel"
+            - "--config"
+            - "/home/dylan/.cloudflared/harmful-moderation-config.yml"
+            - "run"
+        volumes:
+            - ${HOME}/.cloudflared:/home/dylan/.cloudflared:ro
+        depends_on:
+            web:
+                condition: service_started
+        restart: unless-stopped
+        profiles:
+            - edge
+
+    cloudflared_auth:
+        image: cloudflare/cloudflared:latest
+        command:
+            - "tunnel"
+            - "--config"
+            - "/home/dylan/.cloudflared/socialai-auth-config.yml"
+            - "run"
+        volumes:
+            - ${HOME}/.cloudflared:/home/dylan/.cloudflared:ro
+        restart: unless-stopped
+        profiles:
+            - edge
+
+volumes:
+    videos_data:
+    web_db_data:
+    auth_db_data:
+    vllm_cache:
