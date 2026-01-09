@@ -43,9 +43,12 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# .env
+# .env (secrets)
 .env
 .env.local
+.env.*
+!**/.env.example
+secrets/
 
 # database backups and dumps
 *.dump

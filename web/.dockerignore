@@ -1,0 +1,19 @@
+# Keep image lean: exclude frontend and local/dev artifacts.
+frontend/
+**/node_modules/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.git/
+.gitignore
+.github/
+.env
+.env.*
+*.log
+.DS_Store
+videos/

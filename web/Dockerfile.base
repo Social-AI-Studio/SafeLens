@@ -1,0 +1,85 @@
+# syntax=docker/dockerfile:1.7
+
+FROM nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04 AS build
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    ffmpeg \
+    git \
+    libopenblas-dev \
+    libsndfile1 \
+    ninja-build \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv (used only at build time) and let it manage Python 3.11.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+ENV UV_PYTHON_DOWNLOADS=1
+ENV UV_PYTHON_PREFERENCE=only-managed
+ENV UV_CACHE_DIR=/tmp/uv-cache
+
+# Build CTranslate2 with CUDA support.
+WORKDIR /opt
+RUN git clone --recursive https://github.com/OpenNMT/CTranslate2.git
+WORKDIR /opt/CTranslate2/build
+RUN cmake -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/opt/ctranslate2 \
+    -DOPENMP_RUNTIME=COMP \
+    -DWITH_CUDA=ON \
+    -DWITH_CUDNN=ON \
+    -DWITH_OPENBLAS=ON \
+    -DWITH_MKL=OFF \
+    -DOPENBLAS_INCLUDE_DIR=/usr/include/openblas \
+    -DOPENBLAS_LIBRARY=/usr/lib/x86_64-linux-gnu/libopenblas.so \
+    -DCUDNN_INCLUDE_DIR=/usr/local/cuda/include \
+    -DCUDA_DYNAMIC_LOADING=ON \
+    -DBUILD_CLI=OFF \
+    .. \
+    && cmake --build . -j"$(nproc)" \
+    && cmake --install . \
+    && ldconfig
+
+# Install Python deps into a dedicated venv.
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+RUN uv venv /opt/venv --python 3.11
+
+WORKDIR /app
+ENV CTRANSLATE2_ROOT=/opt/ctranslate2
+COPY pyproject.toml requirements.txt /app/web/
+RUN uv pip install -r /app/web/requirements.txt \
+    && uv pip install -r /opt/CTranslate2/python/install_requirements.txt \
+    && uv pip install --force-reinstall --no-deps /opt/CTranslate2/python \
+    && rm -rf /tmp/uv-cache
+
+
+FROM nvidia/cuda:12.6.2-cudnn-runtime-ubuntu22.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libgomp1 \
+    libopenblas0 \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+ENV PYTHONPATH=/app
+ENV LD_LIBRARY_PATH=/opt/ctranslate2/lib:${LD_LIBRARY_PATH}
+
+COPY --from=build /opt/venv /opt/venv
+COPY --from=build /opt/ctranslate2 /opt/ctranslate2
+COPY --from=build /root/.local/share/uv /root/.local/share/uv
+
+WORKDIR /app
+EXPOSE 8000
+ENV HOST=0.0.0.0
+ENV PORT=8000
+
+CMD ["uvicorn", "web.server:app", "--host", "0.0.0.0", "--port", "8000"]
