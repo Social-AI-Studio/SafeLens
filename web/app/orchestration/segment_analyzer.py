@@ -6,6 +6,7 @@ multiple modalities (vision, OCR, audio), and making LLM-based harm decisions.
 """
 
 import os
+import asyncio
 import json
 import logging
 import time
@@ -344,6 +345,42 @@ def sample_frames(
         return []
 
 
+async def _caption_frame(
+    frame_info: Dict[str, Any], semaphore: asyncio.Semaphore
+) -> Optional[str]:
+    frame_path = frame_info["path"]
+    timestamp = frame_info["ts"]
+
+    async with semaphore:
+        try:
+            with metrics.measure_operation(
+                "frame_vision_analysis", video_ts=timestamp, frame_path=frame_path
+            ):
+                labels = await asyncio.to_thread(classify_image, frame_path)
+
+            if isinstance(labels, list):
+                # priority: summary > caption > top label
+                summary_item = next(
+                    (x for x in labels if x.get("category") == "summary"), None
+                )
+                caption_item = next(
+                    (x for x in labels if x.get("category") == "caption"), None
+                )
+                if summary_item:
+                    return f"[{timestamp:.1f}s] {summary_item['label']}"
+                if caption_item:
+                    return f"[{timestamp:.1f}s] Caption: {caption_item['label']}"
+                if labels:
+                    return (
+                        f"[{timestamp:.1f}s] Classification: "
+                        f"{labels[0].get('label', 'unknown')}"
+                    )
+        except Exception as e:
+            logger.warning(f"Vision analysis failed for frame at {timestamp:.1f}s: {e}")
+
+    return None
+
+
 async def gather_evidence(frame_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Gather evidence from sampled frames using vision and OCR.
@@ -360,41 +397,22 @@ async def gather_evidence(frame_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     # Use GPU guard for vision analysis when analyzing multiple frames
     async with gpu_guard(f"vision_analysis_{num_frames}_frames"):
+        # Vision analysis: send multiple frames concurrently (bounded)
+        max_inflight = int(os.getenv("QWEN_VLLM_MAX_INFLIGHT", "2"))
+        caption_sem = asyncio.Semaphore(max(1, max_inflight))
+        caption_tasks = [
+            asyncio.create_task(_caption_frame(frame_info, caption_sem))
+            for frame_info in frame_infos
+        ]
+        if caption_tasks:
+            caption_results = await asyncio.gather(*caption_tasks)
+            for caption in caption_results:
+                if caption:
+                    captions_parts.append(caption)
+
         for frame_info in frame_infos:
             frame_path = frame_info["path"]
             timestamp = frame_info["ts"]
-
-            # Vision analysis with metrics
-            try:
-                with metrics.measure_operation(
-                    "frame_vision_analysis", video_ts=timestamp, frame_path=frame_path
-                ):
-                    labels = classify_image(frame_path)  # List[Dict]
-
-                if isinstance(labels, list):
-                    # priority: summary > caption > top label
-                    summary_item = next(
-                        (x for x in labels if x.get("category") == "summary"), None
-                    )
-                    caption_item = next(
-                        (x for x in labels if x.get("category") == "caption"), None
-                    )
-                    if summary_item:
-                        captions_parts.append(
-                            f"[{timestamp:.1f}s] {summary_item['label']}"
-                        )
-                    elif caption_item:
-                        captions_parts.append(
-                            f"[{timestamp:.1f}s] Caption: {caption_item['label']}"
-                        )
-                    elif labels:
-                        captions_parts.append(
-                            f"[{timestamp:.1f}s] Classification: {labels[0].get('label', 'unknown')}"
-                        )
-            except Exception as e:
-                logger.warning(
-                    f"Vision analysis failed for frame at {timestamp:.1f}s: {e}"
-                )
 
             # OCR analysis with metrics
             try:
