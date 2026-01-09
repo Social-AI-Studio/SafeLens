@@ -29,8 +29,6 @@ def _get_easyocr_reader():
         with G_EASYOCR_LOCK:
             if G_EASYOCR is None:
                 try:
-                    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-
                     reader = easyocr.Reader(["en"], gpu=False, verbose=False)
 
                     if hasattr(reader, "detector") and hasattr(reader.detector, "cpu"):
