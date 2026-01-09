@@ -4,22 +4,21 @@ import Image from "next/image";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { authClient } from "@/lib/auth-client";
-import { useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 
 export default function LoginPage() {
-    const router = useRouter();
+    const searchParams = useSearchParams();
 
     const handleGoogleSignIn = async () => {
         try {
+            const next = searchParams.get("next") ?? "/";
             const result = await authClient.signIn.social({
                 provider: "google",
-                callbackURL: "/",
+                callbackURL: next,
             });
 
             if (result.error) {
                 console.error("Sign in error:", result.error);
-            } else {
-                router.push("/");
             }
         } catch (error) {
             console.error("Sign in failed:", error);
