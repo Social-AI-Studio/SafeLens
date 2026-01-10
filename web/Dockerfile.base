@@ -14,7 +14,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
     ninja-build \
     pkg-config \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Deno for yt-dlp YouTube JS player extraction.
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/opt/deno sh
+ENV PATH="/opt/deno/bin:${PATH}"
 
 # Install uv (used only at build time) and let it manage Python 3.11.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -72,9 +77,11 @@ ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 ENV PYTHONPATH=/app
 ENV LD_LIBRARY_PATH=/opt/ctranslate2/lib:${LD_LIBRARY_PATH}
+ENV PATH="/opt/deno/bin:${PATH}"
 
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build /opt/ctranslate2 /opt/ctranslate2
+COPY --from=build /opt/deno /opt/deno
 COPY --from=build /root/.local/share/uv /root/.local/share/uv
 
 WORKDIR /app

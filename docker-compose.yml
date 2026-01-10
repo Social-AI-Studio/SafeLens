@@ -11,6 +11,10 @@ services:
         environment:
             WHISPER_DEVICE: "cuda"
             WHISPER_COMPUTE_TYPE: "float16"
+            WHISPER_MODEL: "large-v2"
+            WHISPER_MAX_CONCURRENT: "1"
+            WARMUP_ON_START: "true"
+            NLTK_DATA: "/root/nltk_data"
             DATABASE_URL: "postgresql+psycopg://${WEB_DB_USER}:${WEB_DB_PASSWORD}@web_db:5432/${WEB_DB_NAME}"
             QWEN_VLLM_BASE_URL: "http://qwen_router:8080/v1"
             ANALYSIS_LLM_BACKEND: "http"
@@ -22,9 +26,18 @@ services:
               capabilities: [gpu]
         volumes:
             - videos_data:/app/videos
+            - hf_cache:/root/.cache/huggingface
+            - torch_cache:/root/.cache/torch
+            - easyocr_cache:/root/.EasyOCR
+            - nltk_data:/root/nltk_data
         depends_on:
             web_db:
                 condition: service_healthy
+        healthcheck:
+            test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/ready', timeout=3)\""]
+            interval: 30s
+            timeout: 5s
+            retries: 10
         restart: unless-stopped
         profiles:
             - core
@@ -170,7 +183,9 @@ services:
             dockerfile: Dockerfile
         image: safelens-qwen-router
         environment:
-            LLM_ROUTER_BACKENDS: "http://vllm_qwen:8193,http://vllm_qwen_2:8194"
+            # Override for remote/shared backends:
+            #   export QWEN_ROUTER_BACKENDS="http://host:8193,http://host2:8194"
+            LLM_ROUTER_BACKENDS: "${QWEN_ROUTER_BACKENDS:-http://vllm_qwen:8193,http://vllm_qwen_2:8194}"
             LLM_ROUTER_MAX_RETRIES: "1"
             LLM_ROUTER_COOLDOWN_SEC: "5"
             LLM_ROUTER_EWMA_ALPHA: "0.2"
@@ -187,7 +202,9 @@ services:
     llama_router:
         image: safelens-qwen-router
         environment:
-            LLM_ROUTER_BACKENDS: "http://vllm_llama:8192"
+            # Override for remote/shared backends:
+            #   export LLAMA_ROUTER_BACKENDS="http://host:8192"
+            LLM_ROUTER_BACKENDS: "${LLAMA_ROUTER_BACKENDS:-http://vllm_llama:8192}"
             LLM_ROUTER_MAX_RETRIES: "1"
             LLM_ROUTER_COOLDOWN_SEC: "5"
             LLM_ROUTER_EWMA_ALPHA: "0.2"
@@ -232,6 +249,10 @@ services:
 
 volumes:
     videos_data:
+    hf_cache:
+    torch_cache:
+    easyocr_cache:
+    nltk_data:
     web_db_data:
     auth_db_data:
     vllm_cache:

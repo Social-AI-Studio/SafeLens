@@ -17,3 +17,6 @@ __pycache__/
 *.log
 .DS_Store
 videos/
+lora_adapter/
+conversations/
+llama_finetuned*/

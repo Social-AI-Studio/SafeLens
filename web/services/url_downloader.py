@@ -3,6 +3,7 @@ import logging
 import subprocess
 import time
 import re
+import shutil
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable
@@ -337,6 +338,9 @@ class VideoURLDownloader:
             "postprocessors": [],
         }
 
+        if shutil.which("deno"):
+            opts["js_interpreter"] = "deno"
+
         if self.check_ffmpeg():
             opts["postprocessors"].append(
                 {
@@ -387,7 +391,6 @@ class VideoURLDownloader:
 
         original_url = url
         url = self.normalize_url(url)
-        is_short = "shorts/" in original_url
         video_dir = self.download_dir / video_id
 
         self._cleanup_video_dir(video_dir)
@@ -414,11 +417,7 @@ class VideoURLDownloader:
             "format": f"{self.PROGRESSIVE_FALLBACK_FORMAT}/{self.DEFAULT_FORMAT}",
         }
 
-        client_profiles = (
-            [android_profile, web_profile, ios_profile]
-            if is_short
-            else [web_profile, ios_profile, android_profile]
-        )
+        client_profiles = [android_profile, web_profile, ios_profile]
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             profile = client_profiles[min(attempt - 1, len(client_profiles) - 1)]
@@ -540,7 +539,7 @@ class VideoURLDownloader:
                         "view_count": info.get("view_count"),
                         "like_count": info.get("like_count"),
                         "provider": info.get("extractor", "Unknown"),
-                        "original_url": url,
+                        "original_url": original_url,
                         "file_size": file_size,
                         "format": info.get("format"),
                         "resolution": f"{info.get('width', 'Unknown')}x{info.get('height', 'Unknown')}",
