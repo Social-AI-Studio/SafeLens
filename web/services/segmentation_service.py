@@ -88,6 +88,25 @@ def segments_from_transcript(full_text: str, word_timestamps: List[Tuple[str, fl
             transcript_segments.append({"start": current_time, "end": end_time})
             current_time = end_time
 
+    # If transcript-derived segmentation yields nothing (too-short transcript, poor alignment,
+    # transcription failure, etc), fall back to time-based segmentation so we still analyze.
+    if not transcript_segments:
+        logger.warning(
+            "Transcript segmentation produced 0 segments; falling back to time-based segments. "
+            f"full_text_len={len(full_text or '')} word_timestamps_len={len(word_timestamps or [])}"
+        )
+        from .analysis_pipeline import get_true_video_duration_seconds
+
+        duration = duration or get_true_video_duration_seconds(video_path) or 60.0
+        transcript_segments = []
+        current_time = 0.0
+        segment_duration = 10.0
+        while current_time < duration:
+            end_time = min(current_time + segment_duration, duration)
+            if end_time > current_time:
+                transcript_segments.append({"start": current_time, "end": end_time})
+            current_time = end_time
+
     logger.info(f"Created {len(transcript_segments)} transcript segments")
     return transcript_segments
 
