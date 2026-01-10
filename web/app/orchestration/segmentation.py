@@ -6,6 +6,8 @@ to create segments suitable for analysis.
 """
 import logging
 import math
+import os
+import re
 from typing import Dict, List, Optional, Tuple, Any
 import cv2
 import torch
@@ -20,23 +22,73 @@ logger = logging.getLogger(__name__)
 
 # Global model cache
 _vit_cache = {}
+_nltk_warned_missing = False
 
 
-def download_nltk_data():
-    """Download required NLTK data if not present."""
-    # Try punkt_tab first (newer NLTK versions)
+def _ensure_sentence_tokenizer() -> bool:
+    """
+    Ensure NLTK sentence tokenizer resources are available.
+
+    In production we avoid downloading at runtime (set NLTK_AUTO_DOWNLOAD=false)
+    and fall back to a lightweight regex-based sentence splitter when punkt is missing.
+    """
+    global _nltk_warned_missing
+
+    # Try punkt_tab first (newer NLTK versions), then punkt.
+    for resource in ("tokenizers/punkt_tab", "tokenizers/punkt"):
+        try:
+            nltk.data.find(resource)
+            return True
+        except LookupError:
+            continue
+
+    auto_download = os.getenv("NLTK_AUTO_DOWNLOAD", "false").lower() == "true"
+    if not auto_download:
+        if not _nltk_warned_missing:
+            _nltk_warned_missing = True
+            nltk_data = os.getenv("NLTK_DATA")
+            logger.warning(
+                "NLTK punkt data not found; falling back to naive sentence splitting. "
+                "Remediation: mount/populate NLTK_DATA (e.g. /root/nltk_data) or set NLTK_AUTO_DOWNLOAD=true."
+                + (f" (NLTK_DATA={nltk_data})" if nltk_data else "")
+            )
+        return False
+
+    # Best-effort download (mainly for local dev).
     try:
-        nltk.data.find('tokenizers/punkt_tab')
-    except LookupError:
-        logger.info("Downloading NLTK punkt_tab tokenizer")
-        nltk.download('punkt_tab', quiet=True)
-    
-    # Fallback to punkt (older NLTK versions)
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        logger.info("Downloading NLTK punkt tokenizer")
-        nltk.download('punkt', quiet=True)
+        logger.info("Downloading NLTK punkt tokenizer data (NLTK_AUTO_DOWNLOAD=true)")
+        try:
+            nltk.download("punkt_tab", quiet=True)
+        except Exception:
+            pass
+        try:
+            nltk.download("punkt", quiet=True)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning(f"NLTK download failed: {e}")
+        return False
+
+    for resource in ("tokenizers/punkt_tab", "tokenizers/punkt"):
+        try:
+            nltk.data.find(resource)
+            return True
+        except LookupError:
+            continue
+    return False
+
+
+def _sent_tokenize_safe(text: str) -> List[str]:
+    if not text:
+        return []
+    if _ensure_sentence_tokenizer():
+        try:
+            return [s for s in sent_tokenize(text) if isinstance(s, str) and s.strip()]
+        except Exception:
+            pass
+    # Regex fallback: language-agnostic enough for our purposes.
+    parts = re.split(r"(?<=[.!?])\\s+", text.strip())
+    return [p.strip() for p in parts if p and p.strip()]
 
 
 def build_transcript_segments(
@@ -82,8 +134,7 @@ def build_transcript_segments(
                 })
             else:
                 # Split long segments into sentences
-                download_nltk_data()
-                sentences = sent_tokenize(text)
+                sentences = _sent_tokenize_safe(text)
                 if len(sentences) <= 1:
                     result_segments.append({
                         'start': start,
@@ -121,10 +172,10 @@ def build_transcript_segments(
         
     elif full_text and word_timestamps:
         logger.info(f"Processing full text with {len(word_timestamps)} word timestamps")
-        download_nltk_data()
+        # Sentence tokenization is best-effort; fall back if NLTK data is missing.
         
         # Tokenize into sentences
-        sentences = sent_tokenize(full_text)
+        sentences = _sent_tokenize_safe(full_text)
         result_segments = []
         
         # Create word lookup for timing
