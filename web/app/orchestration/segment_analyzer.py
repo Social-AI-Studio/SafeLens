@@ -84,6 +84,202 @@ def _apply_text_hygiene(text_parts: List[str], max_chars: int = 1500) -> str:
     return full_text
 
 
+# Visual suspicion keywords used for probe-based escalation. These are intentionally
+# broader than the final judge categories: false positives here only increase
+# sampling density; the judge still makes the final call.
+VISUAL_SUSPICION_KEYWORDS = {
+    "hate": [
+        "swastika",
+        "nazi",
+        "hitler",
+        "kkk",
+        "white power",
+        "n-word",
+        "kike",
+        "spic",
+        "chink",
+        "towelhead",
+        "raghead",
+        "faggot",
+        "tranny",
+    ],
+    "violence": [
+        "gun",
+        "rifle",
+        "pistol",
+        "weapon",
+        "knife",
+        "blood",
+        "gore",
+        "corpse",
+        "dead body",
+        "shooting",
+        "stabbing",
+        "explosion",
+        "bomb",
+    ],
+    "nudity": [
+        "nudity",
+        "nude",
+        "naked",
+        "porn",
+        "sex",
+        "genitals",
+        "breasts",
+    ],
+    "drugs": [
+        "cocaine",
+        "heroin",
+        "meth",
+        "crack",
+        "fentanyl",
+        "needle",
+        "syringe",
+        "pills",
+    ],
+}
+
+
+def _is_transcript_sparse(segment_text: str, segment_duration_sec: float) -> bool:
+    """
+    Heuristic for segments where the transcript is too sparse to trust audio evidence.
+
+    This is a proxy for silence/music/transcription failure; in these cases we should
+    bias toward denser visual sampling (captioning + OCR).
+    """
+    min_words = int(os.getenv("SEG_MIN_TRANSCRIPT_WORDS", "8"))
+    min_chars = int(os.getenv("SEG_MIN_TRANSCRIPT_CHARS", "40"))
+    min_words_per_sec = float(os.getenv("SEG_MIN_WORDS_PER_SEC", "0.6"))
+
+    text = (segment_text or "").strip()
+    if not text:
+        return True
+
+    words = text.split()
+    if len(words) < min_words:
+        return True
+
+    if len(text) < min_chars:
+        return True
+
+    if segment_duration_sec > 0:
+        if (len(words) / segment_duration_sec) < min_words_per_sec:
+            return True
+
+    return False
+
+
+def _build_probe_timestamps(seg_start: float, seg_end: float, count: int) -> List[float]:
+    """
+    Deterministically choose a small set of timestamps for a cheap visual probe.
+
+    Default intent: roughly start/mid/end, nudged away from exact edges.
+    """
+    if count <= 0:
+        return []
+
+    duration = seg_end - seg_start
+    if duration <= 0:
+        return []
+
+    # Avoid exact boundaries (ffmpeg/OpenCV seeking can be finicky at end-of-file).
+    edge_pad = min(0.25, max(0.01, duration * 0.05))
+    left = min(seg_start + edge_pad, seg_end)
+    right = max(seg_end - edge_pad, seg_start)
+
+    if count == 1:
+        return [seg_start + (duration / 2.0)]
+    if count == 2:
+        return sorted(list({left, right}))
+
+    # 3+ points: include left/mid/right, then fill evenly.
+    points = [left, seg_start + (duration / 2.0), right]
+    if count > 3:
+        inner_start = left
+        inner_end = right
+        if inner_end <= inner_start:
+            return sorted(list({p for p in points if seg_start <= p <= seg_end}))[:count]
+
+        extra_needed = count - 3
+        step = (inner_end - inner_start) / (extra_needed + 1)
+        for i in range(1, extra_needed + 1):
+            points.append(inner_start + step * i)
+
+    # Deduplicate and clamp defensively.
+    out = [p for p in sorted(set(points)) if seg_start <= p <= seg_end]
+    return out[:count]
+
+
+def _score_visual_probe_suspicion(captions_text: str, ocr_text: str) -> Tuple[bool, str]:
+    """
+    Decide whether probe evidence warrants denser sampling for this segment.
+
+    Returns:
+        (suspicious, reason)
+    """
+    combined = f"{captions_text or ''}\n{ocr_text or ''}".lower()
+    combined = combined.strip()
+    if not combined:
+        return False, "empty_probe_evidence"
+
+    hits: List[str] = []
+    for category, keywords in VISUAL_SUSPICION_KEYWORDS.items():
+        for kw in keywords:
+            if kw in combined:
+                hits.append(f"{category}:{kw}")
+                # Keep scanning to allow multiple categories, but cap for logs.
+                if len(hits) >= 4:
+                    break
+        if len(hits) >= 4:
+            break
+
+    if hits:
+        return True, "visual_probe_hits=" + ",".join(hits)
+
+    return False, "no_visual_probe_hits"
+
+
+def _log_sampling_decision(
+    *,
+    video_id: str,
+    seg_index: int,
+    start: float,
+    end: float,
+    sampling_mode: str,
+    num_frames: int,
+    interval_sec: Optional[float],
+    transcript_words: int,
+    transcript_chars: int,
+    transcript_sparse: bool,
+    suspicion_method: str,
+    suspicion_confidence: float,
+    is_suspicious: bool,
+    planned_points: int,
+    probe_frames: int,
+    probe_sampled_frames: int,
+    visual_probe_suspicious: bool,
+    visual_probe_reason: str,
+) -> None:
+    # Single-line structured log for tmux/debug readability.
+    try:
+        interval_txt = f"{interval_sec:.2f}s" if isinstance(interval_sec, (int, float)) else "n/a"
+        logger.info(
+            "Sampling decision: "
+            f"video_id={video_id} seg={seg_index + 1} "
+            f"span=[{start:.1f}-{end:.1f}] "
+            f"mode={sampling_mode} frames={num_frames} interval={interval_txt} "
+            f"probe_frames={probe_frames} probe_sampled={probe_sampled_frames} "
+            f"transcript_words={transcript_words} transcript_chars={transcript_chars} "
+            f"transcript_sparse={transcript_sparse} "
+            f"suspicious={is_suspicious} suspicion_method={suspicion_method} suspicion_conf={suspicion_confidence:.2f} "
+            f"planned_points={planned_points} "
+            f"visual_probe_suspicious={visual_probe_suspicious} visual_probe_reason={visual_probe_reason}"
+        )
+    except Exception:
+        # Never allow logging to break analysis.
+        return
+
+
 # Removed signal-based timeout context manager as it doesn't work in background threads
 # Provider-level timeouts are used instead (ANALYSIS_LLM_TIMEOUT_SEC)
 
@@ -741,7 +937,7 @@ Only return valid JSON without any additional text."""
 
     try:
         # Call LLM with provider-level timeout (configured in SafetyLLM)
-        result = llm.invoke(prompt)
+        result = llm.invoke(prompt, timeout=int(timeout_sec))
 
         if isinstance(result, dict):
             # Check for provider-level error
@@ -857,6 +1053,20 @@ async def analyze_segments(
     harmful_events = []
     total_tokens = {"prompt_tokens": 0, "completion_tokens": 0}
 
+    two_pass_enabled = os.getenv("SEG_TWO_PASS_ENABLED", "false").lower() == "true"
+    probe_frames = int(os.getenv("SEG_PROBE_FRAMES", "3"))
+    # When visual evidence is prioritized (sparse transcript or visual probe hits),
+    # use this cadence for periodic timestamps.
+    visual_priority_interval_sec = float(os.getenv("SEG_VISUAL_PRIORITY_SAMPLE_SEC", "2.0"))
+
+    if two_pass_enabled:
+        logger.info(
+            "Two-pass sampling enabled: "
+            f"probe_frames={probe_frames} "
+            f"visual_priority_interval_sec={visual_priority_interval_sec:.2f}s "
+            f"max_frames_per_segment={cfg.max_frames_per_segment}"
+        )
+
     for i, segment in enumerate(segments):
         start = segment["start"]
         end = segment["end"]
@@ -910,6 +1120,22 @@ async def analyze_segments(
                 cfg.suspicion_mode = "keywords"
 
             is_suspicious = suspicion_result["suspicious"]
+            suspicion_method = str(suspicion_result.get("method", "unknown"))
+            try:
+                suspicion_confidence = float(suspicion_result.get("confidence", 0.0))
+            except Exception:
+                suspicion_confidence = 0.0
+
+            segment_duration = float(end - start)
+            transcript_sparse = _is_transcript_sparse(segment_text, segment_duration)
+            transcript_words = len((segment_text or "").split())
+            transcript_chars = len((segment_text or "").strip())
+            visual_probe_suspicious = False
+            visual_probe_reason = "disabled"
+            do_full_sampling = True
+            sampling_mode = "full"
+            sampling_interval_sec: Optional[float] = None
+            probe_sampled_frames = 0
 
             # 3. Planning step: propose additional probe points if enabled
             planned_timestamps = []
@@ -947,55 +1173,189 @@ async def analyze_segments(
                         f"LLM planner failed for segment [{start:.1f}s-{end:.1f}s]: {e}"
                     )
 
-            # 4. Generate sampling timestamps (periodic + planned)
-            interval = (
-                cfg.seg_suspicious_sample_sec
-                if is_suspicious
-                else cfg.seg_safe_sample_sec
-            )
+            # 4. Generate sampling timestamps (periodic + optional LLM points)
+            if two_pass_enabled:
+                probe_timestamps = _build_probe_timestamps(start, end, probe_frames)
 
-            # Generate periodic timestamps
-            periodic_timestamps = []
-            current = start
-            while (
-                current < end and len(periodic_timestamps) < cfg.max_frames_per_segment
-            ):
-                periodic_timestamps.append(current)
-                current += interval
+                # Decide whether to do a cheap probe-only pass or a full pass.
+                # - If transcript is suspicious OR transcript is sparse => go straight to full sampling.
+                # - Else, run probe (caption+OCR), and escalate to full if probe looks suspicious.
+                do_full_sampling = bool(is_suspicious or transcript_sparse)
+                visual_probe_reason = "not_evaluated"
 
-            # Merge with planned timestamps if any
-            if planned_timestamps:
-                remaining_points_budget = (
-                    planner_cfg.planner_llm_max_points - planned_points_total
-                )
-                final_timestamps = merge_timestamps_with_planning(
-                    periodic_timestamps,
-                    planned_timestamps,
-                    planner_cfg,
-                    max_frames_per_segment=cfg.max_frames_per_segment,
-                    remaining_points_budget=remaining_points_budget,
-                )
+                probe_evidence: Optional[Dict[str, Any]] = None
+                if not do_full_sampling:
+                    probe_frame_infos = sample_frames(
+                        video_path,
+                        start,
+                        end,
+                        cfg.seg_safe_sample_sec,
+                        max(1, probe_frames),
+                        timestamps=probe_timestamps,
+                    )
+                    if probe_frame_infos:
+                        probe_sampled_frames = len(probe_frame_infos)
+                        probe_evidence = await gather_evidence(probe_frame_infos)
+                        visual_probe_suspicious, visual_probe_reason = _score_visual_probe_suspicion(
+                            probe_evidence.get("captions"), probe_evidence.get("ocr")
+                        )
+                        if visual_probe_suspicious:
+                            logger.info(
+                                "Probe escalation triggered: "
+                                f"video_id={video_id} seg={i + 1} span=[{start:.1f}-{end:.1f}] "
+                                f"reason={visual_probe_reason}"
+                            )
+                            do_full_sampling = True
+                    else:
+                        # No probe frames available; fall back to full sampling to avoid blind spots.
+                        do_full_sampling = True
+                        visual_probe_reason = "no_probe_frames"
+
+                if do_full_sampling:
+                    # Select cadence: transcript sparse and/or visual-probe suspicious should bias toward
+                    # denser visual sampling than the safe cadence.
+                    if transcript_sparse or visual_probe_suspicious:
+                        interval = visual_priority_interval_sec
+                    else:
+                        interval = cfg.seg_suspicious_sample_sec if is_suspicious else cfg.seg_safe_sample_sec
+                    sampling_interval_sec = float(interval)
+
+                    # Generate periodic timestamps
+                    periodic_timestamps: List[float] = []
+                    current = start
+                    while (
+                        current < end and len(periodic_timestamps) < cfg.max_frames_per_segment
+                    ):
+                        periodic_timestamps.append(current)
+                        current += interval
+
+                    # Merge with planned timestamps if any
+                    if planned_timestamps:
+                        remaining_points_budget = (
+                            planner_cfg.planner_llm_max_points - planned_points_total
+                        )
+                        periodic_timestamps = merge_timestamps_with_planning(
+                            periodic_timestamps,
+                            planned_timestamps,
+                            planner_cfg,
+                            max_frames_per_segment=cfg.max_frames_per_segment,
+                            remaining_points_budget=remaining_points_budget,
+                        )
+
+                    # Always include probe timestamps in the full sampling set for coverage.
+                    # Because sample_frames applies a cap by list order, we must select
+                    # up to cap timestamps while guaranteeing probe points are kept.
+                    probe_set = {ts for ts in probe_timestamps if start <= ts <= end}
+                    selected: List[float] = []
+                    for ts in sorted(probe_set):
+                        selected.append(ts)
+
+                    for ts in periodic_timestamps:
+                        if ts in probe_set:
+                            continue
+                        if not (start <= ts <= end):
+                            continue
+                        selected.append(ts)
+                        if len(selected) >= cfg.max_frames_per_segment:
+                            break
+
+                    merged = sorted(set(selected))
+
+                    # 5. Sample frames using merged timestamps
+                    frame_infos = sample_frames(
+                        video_path,
+                        start,
+                        end,
+                        interval,
+                        cfg.max_frames_per_segment,
+                        timestamps=merged,
+                    )
+
+                    if not frame_infos:
+                        logger.warning(
+                            f"No frames sampled for segment [{start:.1f}s-{end:.1f}s], skipping"
+                        )
+                        continue
+
+                    # 6. Gather evidence from frames (async with GPU guard)
+                    evidence = await gather_evidence(frame_infos)
+                    sampling_mode = "full"
+                else:
+                    # Probe-only evidence (caption + OCR) is used as the segment evidence.
+                    evidence = probe_evidence or {"captions": "", "ocr": "", "num_frames": 0}
+                    sampling_mode = "probe"
             else:
-                final_timestamps = periodic_timestamps
-
-            # 5. Sample frames using final timestamps
-            frame_infos = sample_frames(
-                video_path,
-                start,
-                end,
-                interval,
-                cfg.max_frames_per_segment,
-                timestamps=final_timestamps,
-            )
-
-            if not frame_infos:
-                logger.warning(
-                    f"No frames sampled for segment [{start:.1f}s-{end:.1f}s], skipping"
+                interval = (
+                    cfg.seg_suspicious_sample_sec
+                    if is_suspicious
+                    else cfg.seg_safe_sample_sec
                 )
-                continue
+                sampling_interval_sec = float(interval)
 
-            # 6. Gather evidence from frames (async with GPU guard)
-            evidence = await gather_evidence(frame_infos)
+                # Generate periodic timestamps
+                periodic_timestamps = []
+                current = start
+                while (
+                    current < end and len(periodic_timestamps) < cfg.max_frames_per_segment
+                ):
+                    periodic_timestamps.append(current)
+                    current += interval
+
+                # Merge with planned timestamps if any
+                if planned_timestamps:
+                    remaining_points_budget = (
+                        planner_cfg.planner_llm_max_points - planned_points_total
+                    )
+                    final_timestamps = merge_timestamps_with_planning(
+                        periodic_timestamps,
+                        planned_timestamps,
+                        planner_cfg,
+                        max_frames_per_segment=cfg.max_frames_per_segment,
+                        remaining_points_budget=remaining_points_budget,
+                    )
+                else:
+                    final_timestamps = periodic_timestamps
+
+                # 5. Sample frames using final timestamps
+                frame_infos = sample_frames(
+                    video_path,
+                    start,
+                    end,
+                    interval,
+                    cfg.max_frames_per_segment,
+                    timestamps=final_timestamps,
+                )
+
+                if not frame_infos:
+                    logger.warning(
+                        f"No frames sampled for segment [{start:.1f}s-{end:.1f}s], skipping"
+                    )
+                    continue
+
+                # 6. Gather evidence from frames (async with GPU guard)
+                evidence = await gather_evidence(frame_infos)
+                sampling_mode = "full"
+
+            _log_sampling_decision(
+                video_id=video_id,
+                seg_index=i,
+                start=start,
+                end=end,
+                sampling_mode=sampling_mode,
+                num_frames=int(evidence.get("num_frames", 0) or 0),
+                interval_sec=sampling_interval_sec,
+                transcript_words=transcript_words,
+                transcript_chars=transcript_chars,
+                transcript_sparse=bool(transcript_sparse),
+                suspicion_method=suspicion_method,
+                suspicion_confidence=suspicion_confidence,
+                is_suspicious=bool(is_suspicious),
+                planned_points=len(planned_timestamps) if planned_timestamps else 0,
+                probe_frames=int(probe_frames),
+                probe_sampled_frames=int(probe_sampled_frames),
+                visual_probe_suspicious=bool(visual_probe_suspicious),
+                visual_probe_reason=str(visual_probe_reason),
+            )
 
             # 7. LLM decision with metrics
             segment_info = f"[{start:.1f}s-{end:.1f}s]"
@@ -1052,6 +1412,10 @@ async def analyze_segments(
                         "planned_points": len(planned_timestamps)
                         if planned_timestamps
                         else 0,
+                        "transcript_sparse": transcript_sparse,
+                        "visual_probe_suspicious": visual_probe_suspicious,
+                        "visual_probe_reason": visual_probe_reason,
+                        "sampling_mode": "full" if do_full_sampling else "probe",
                     },
                 }
 
