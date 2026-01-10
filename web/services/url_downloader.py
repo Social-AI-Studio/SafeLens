@@ -4,6 +4,7 @@ import subprocess
 import time
 import re
 import shutil
+import os
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable
@@ -338,8 +339,24 @@ class VideoURLDownloader:
             "postprocessors": [],
         }
 
-        if shutil.which("deno"):
-            opts["js_interpreter"] = "deno"
+        # Ensure yt-dlp can use a JS runtime when YouTube challenges require it.
+        # In newer yt-dlp versions, this is controlled via --js-runtimes, not --js-interpreter.
+        deno_path = shutil.which("deno")
+        if deno_path:
+            opts.setdefault("js_runtimes", {})
+            opts["js_runtimes"].setdefault("deno", {"path": deno_path})
+
+        # Optional: allow fetching yt-dlp-ejs remote components (can reduce "challenge solving failed").
+        # Keep this opt-in because it pulls code at runtime.
+        remote_components = os.getenv("YTDLP_REMOTE_COMPONENTS", "").strip()
+        if remote_components:
+            components = {
+                c.strip()
+                for c in remote_components.split(",")
+                if isinstance(c, str) and c.strip()
+            }
+            if components:
+                opts["remote_components"] = components
 
         if self.check_ffmpeg():
             opts["postprocessors"].append(
@@ -457,7 +474,8 @@ class VideoURLDownloader:
                     logger.info(f"Video detected from {extractor}: {title}")
 
                     logger.info(f"Starting download for video: {title}")
-                    ydl.download([url])
+                    # Avoid re-extracting info (which can trigger extra JS challenge failures).
+                    ydl.process_ie_result(info, download=True)
 
                     downloaded_files = list(video_dir.glob("video.*"))
                     downloaded_files = [f for f in downloaded_files if not f.suffix in [".part", ".ytdl", ".temp"]]
