@@ -38,7 +38,7 @@ export interface AnalysisData {
     analysisModel?: string;
     videoDuration?: number; // seconds, from backend metadata if available
     clusteringConfig?: ClusteringConfig;
-    transcriptionWords?: TranscriptionWord[]; // Word-level timestamps for synced lyrics
+    transcriptionWords?: TranscriptionWord[]; // Word-level timestamps for synced transcriptions
     transcriptionLines?: TranscriptionLine[]; // Optional cached line segmentation
 }
 

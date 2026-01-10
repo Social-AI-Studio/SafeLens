@@ -101,9 +101,19 @@ function VideoAnalysisContent() {
                 const data = event.analysis_data || {};
                 const confidence =
                     (typeof data.confidence === "number" ? data.confidence : 0) / 100;
-                const categories = Array.isArray(data.categories)
-                    ? data.categories
-                    : [];
+                const categories = (() => {
+                    if (Array.isArray(data.categories)) {
+                        const cleaned = data.categories
+                            .filter((c: unknown) => typeof c === "string")
+                            .map((c: string) => c.trim())
+                            .filter(Boolean);
+                        return cleaned.length ? cleaned : ["Uncategorized"];
+                    }
+                    if (typeof data.categories === "string" && data.categories.trim()) {
+                        return [data.categories.trim()];
+                    }
+                    return ["Uncategorized"];
+                })();
                 const factorWeights = (() => {
                     const fw = data.factor_weights;
                     if (fw && typeof fw === "object") {
@@ -115,8 +125,11 @@ function VideoAnalysisContent() {
                     }
                     return undefined;
                 })();
-                const description =
-                    data.explanation || "Harmful content detected through AI analysis";
+                const description = (() => {
+                    const raw = typeof data.explanation === "string" ? data.explanation : "";
+                    const cleaned = raw.trim();
+                    return cleaned || "No explanation returned by model";
+                })();
                 const method = Array.isArray(event.analysis_performed)
                     ? event.analysis_performed.join(", ")
                     : "analysis";
@@ -126,7 +139,7 @@ function VideoAnalysisContent() {
                     startTime: start,
                     endTime: end,
                     confidence,
-                    type: categories.length ? categories.join(", ") : "harmful content",
+                    type: categories.join(", "),
                     description,
                     evidence,
                     source: "multimodal",
@@ -137,25 +150,35 @@ function VideoAnalysisContent() {
                 } as HarmfulContent;
             }
 
+            const categories = (() => {
+                if (Array.isArray(event.categories)) {
+                    const cleaned = event.categories
+                        .filter((c: unknown) => typeof c === "string")
+                        .map((c: string) => c.trim())
+                        .filter(Boolean);
+                    return cleaned.length ? cleaned : ["Uncategorized"];
+                }
+                if (typeof event.categories === "string" && event.categories.trim()) {
+                    return [event.categories.trim()];
+                }
+                return ["Uncategorized"];
+            })();
+
             return {
                 startTime: event.timestamp || 0,
                 endTime: (event.timestamp || 0) + 1,
                 confidence: (event.confidence_score || 0) / 100,
-                type: Array.isArray(event.categories)
-                    ? event.categories.join(", ")
-                    : event.categories || "harmful content",
+                type: categories.join(", "),
                 description:
-                    event.description ||
-                    event.explanation ||
-                    event.details ||
-                    "Harmful content detected through AI analysis",
+                    (typeof event.description === "string" && event.description.trim()) ||
+                    (typeof event.explanation === "string" && event.explanation.trim()) ||
+                    (typeof event.details === "string" && event.details.trim()) ||
+                    "No explanation returned by model",
                 evidence: event.evidence || event.reasoning || event.context || "",
                 source: event.detection_source || event.source || "vision",
                 detectionMethod:
                     event.detection_method || event.method || "Multi-modal AI analysis",
-                categories: Array.isArray(event.categories)
-                    ? event.categories
-                    : [event.categories || "harmful content"],
+                categories,
                 factorWeights:
                     event.factor_weights && typeof event.factor_weights === "object"
                         ? {

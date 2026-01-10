@@ -35,6 +35,18 @@ export default function EventExplanation({ selectedEvent }: EventExplanationProp
         );
     }
 
+    const categoriesForDisplay = (() => {
+        const raw =
+            selectedEvent.categories?.length && selectedEvent.categories.some(Boolean)
+                ? selectedEvent.categories
+                : selectedEvent.type.split(", ");
+        const cleaned = raw
+            .filter((c) => typeof c === "string")
+            .map((c) => c.trim())
+            .filter(Boolean);
+        return cleaned.length ? cleaned : ["Uncategorized"];
+    })();
+
     return (
         <Card
             className="flex flex-col"
@@ -113,18 +125,13 @@ export default function EventExplanation({ selectedEvent }: EventExplanationProp
                         <div>
                             <span className="text-base font-medium">Categories:</span>
                             <div className="mt-3 flex flex-wrap gap-1">
-                                {(
-                                    selectedEvent.categories ||
-                                    selectedEvent.type.split(", ")
-                                ).map((category, index) => (
+                                {categoriesForDisplay.map((category, index) => (
                                     <Badge
                                         key={index}
                                         variant="outline"
                                         className="text-sm"
                                     >
-                                        {typeof category === "string"
-                                            ? category.trim()
-                                            : category}
+                                        {category}
                                     </Badge>
                                 ))}
                             </div>

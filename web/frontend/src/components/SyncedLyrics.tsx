@@ -164,8 +164,8 @@ export default function SyncedLyrics({ words, config = {} }: SyncedLyricsProps) 
             <div
                 className={`${containerHeightClass} flex items-center justify-center text-muted-foreground italic p-4`}
             >
-                Word-level timestamps not available. Synced lyrics require at least 3
-                words with timestamps.
+                Synced transcriptions aren’t available because the transcript is too short
+                (needs at least 3 words).
             </div>
         );
     }
