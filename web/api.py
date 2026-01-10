@@ -1,4 +1,5 @@
 import os
+import asyncio
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -6,6 +7,8 @@ from sqlalchemy.orm import Session
 from .logging_config import configure_logging
 from .database import get_db, init_db, Account
 from .app.runtime.gpu_guard import initialize_gpu_guard
+from .app.runtime.readiness import set_not_ready, set_ready
+from .app.startup.warmup import warmup_providers
 from .routers import videos, health
 from .schemas.responses import UserRegistration, UserResponse
 
@@ -53,7 +56,35 @@ if CORS_ENABLED:
     )
 
 app.include_router(videos.router, prefix="/api")
+# Expose health endpoints both at /health/* and /api/health/*.
+# This keeps backwards compatibility while allowing Compose healthchecks
+# to use the same /api prefix as other endpoints.
 app.include_router(health.router)
+app.include_router(health.router, prefix="/api")
+
+
+@app.on_event("startup")
+async def _startup_warmup():
+    warmup_on_start = os.getenv("WARMUP_ON_START", "false").lower() == "true"
+    if not warmup_on_start:
+        set_ready(status="warmup_skipped", details={"warmup_on_start": False})
+        return
+
+    set_not_ready("warming_up", details={"warmup_on_start": True})
+    try:
+        # Warmup can be CPU/GPU-heavy; run in a thread to keep the loop responsive.
+        details = await asyncio.to_thread(warmup_providers)
+        all_ok = all(
+            isinstance(v, dict) and v.get("ok") is True
+            for k, v in details.items()
+            if k in ("transcription", "ocr", "nltk")
+        )
+        if all_ok:
+            set_ready(status="ok", details=details)
+        else:
+            set_not_ready("warmup_failed", details=details)
+    except Exception as e:
+        set_not_ready("warmup_exception", details={"error": str(e)})
 
 
 @app.post("/api/auth/register", response_model=UserResponse)

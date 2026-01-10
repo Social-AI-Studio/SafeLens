@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from fastapi import APIRouter
 from ..app.health.providers import get_providers_health
+from ..app.runtime.readiness import get_readiness
 
 logger = logging.getLogger(__name__)
 
@@ -32,3 +33,9 @@ async def health_providers():
     except Exception as e:
         logger.error(f"Health providers check failed: {e}")
         return {"status": "error", "error": str(e), "providers": {}}
+
+
+@router.get("/health/ready")
+async def health_ready():
+    """Readiness endpoint: indicates whether warmup has completed successfully."""
+    return get_readiness()

@@ -106,3 +106,16 @@ def run_ocr(image_path):
     except Exception as e:
         logger.debug(f"Tesseract fallback also failed: {e}")
         return ""
+
+
+def warmup_ocr() -> dict:
+    """
+    Eagerly initialize OCR backend to avoid first-request downloads/initialization.
+    """
+    try:
+        reader = _get_easyocr_reader()
+        if reader is not None:
+            return {"ok": True, "backend": "easyocr"}
+        return {"ok": True, "backend": "tesseract_fallback"}
+    except Exception as e:
+        return {"ok": False, "backend": "unknown", "error": str(e)}
