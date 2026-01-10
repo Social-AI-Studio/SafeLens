@@ -401,9 +401,43 @@ class VideoURLDownloader:
             if not isinstance(fmt, dict):
                 continue
             vcodec = fmt.get("vcodec")
-            if isinstance(vcodec, str) and vcodec != "none":
+            # Some challenge-failure cases still return formats, but without a downloadable URL.
+            if (
+                isinstance(vcodec, str)
+                and vcodec != "none"
+                and isinstance(fmt.get("url"), str)
+                and fmt.get("url")
+            ):
                 return True
         return False
+
+    def _file_has_video_stream(self, path: Path) -> bool:
+        """Verify the downloaded artifact actually contains a video stream."""
+        if not self.check_ffmpeg():
+            # If ffmpeg/ffprobe aren't available, fall back to trusting yt-dlp.
+            return True
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=codec_type",
+                    "-of",
+                    "csv=p=0",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            return bool(result.stdout.strip())
+        except Exception:
+            return True
 
     def download_video(
         self,
@@ -515,8 +549,19 @@ class VideoURLDownloader:
                     if not downloaded_files:
                         raise RuntimeError("Download completed but file not found")
 
-                    video_file = downloaded_files[0]
+                    video_file = max(downloaded_files, key=lambda p: p.stat().st_size)
                     final_path = video_dir / "video.mp4"
+
+                    if not self._file_has_video_stream(video_file):
+                        last_error = (
+                            f"Downloaded artifact has no video stream (likely YouTube challenge failure): {video_file.name}"
+                        )
+                        last_error_code = DownloadErrorCode.EXTRACTION_FAILED
+                        if attempt < self.MAX_RETRIES:
+                            logger.warning(f"{last_error}. Retrying with fallback client...")
+                            continue
+                        logger.error(last_error)
+                        break
 
                     if video_file.suffix != ".mp4":
                         if self.check_ffmpeg():
