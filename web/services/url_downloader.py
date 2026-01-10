@@ -5,6 +5,7 @@ import time
 import re
 import shutil
 import os
+import importlib.util
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable
@@ -12,6 +13,7 @@ from urllib.parse import urlparse, parse_qs
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+_warned_missing_ytdlp_ejs = False
 
 
 class DownloadErrorCode(str, Enum):
@@ -345,6 +347,16 @@ class VideoURLDownloader:
         if deno_path:
             opts.setdefault("js_runtimes", {})
             opts["js_runtimes"].setdefault("deno", {"path": deno_path})
+
+        global _warned_missing_ytdlp_ejs
+        if not _warned_missing_ytdlp_ejs:
+            if importlib.util.find_spec("yt_dlp_ejs") is None:
+                _warned_missing_ytdlp_ejs = True
+                logger.warning(
+                    "yt-dlp-ejs is not installed; YouTube JS/EJS challenges may hide video formats "
+                    "and cause low-quality fallbacks. Rebuild the web base image to pick up updated deps, "
+                    "or set YTDLP_REMOTE_COMPONENTS=ejs:github (supply-chain tradeoff)."
+                )
 
         # Optional: allow fetching yt-dlp-ejs remote components (can reduce "challenge solving failed").
         # Keep this opt-in because it pulls code at runtime.
