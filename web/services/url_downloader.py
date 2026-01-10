@@ -451,6 +451,70 @@ class VideoURLDownloader:
         except Exception:
             return True
 
+    def _ffprobe_stream_summary(self, path: Path) -> Dict[str, Any]:
+        """Best-effort media probe for debugging download quality."""
+        if not self.check_ffmpeg():
+            return {"ok": False, "error": "ffprobe_unavailable"}
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=index,codec_type,codec_name,width,height,avg_frame_rate,channels,sample_rate",
+                    "-of",
+                    "json",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                return {"ok": False, "error": result.stderr.strip() or "ffprobe_failed"}
+            import json
+
+            payload = json.loads(result.stdout or "{}")
+            streams = payload.get("streams") if isinstance(payload, dict) else None
+            if not isinstance(streams, list):
+                return {"ok": False, "error": "no_streams"}
+
+            video = next(
+                (
+                    s
+                    for s in streams
+                    if isinstance(s, dict) and s.get("codec_type") == "video"
+                ),
+                None,
+            )
+            audio = next(
+                (
+                    s
+                    for s in streams
+                    if isinstance(s, dict) and s.get("codec_type") == "audio"
+                ),
+                None,
+            )
+            summary: Dict[str, Any] = {"ok": True}
+            if isinstance(video, dict):
+                summary["video"] = {
+                    "codec": video.get("codec_name"),
+                    "width": video.get("width"),
+                    "height": video.get("height"),
+                    "fps": video.get("avg_frame_rate"),
+                }
+            if isinstance(audio, dict):
+                summary["audio"] = {
+                    "codec": audio.get("codec_name"),
+                    "channels": audio.get("channels"),
+                    "sample_rate": audio.get("sample_rate"),
+                }
+            return summary
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def download_video(
         self,
         url: str,
@@ -553,7 +617,32 @@ class VideoURLDownloader:
 
                     logger.info(f"Starting download for video: {title}")
                     # Avoid re-extracting info (which can trigger extra JS challenge failures).
-                    ydl.process_ie_result(info, download=True)
+                    result_info = ydl.process_ie_result(info, download=True) or info
+
+                    # Log selected formats if yt-dlp exposes them (varies by extractor/version).
+                    try:
+                        requested = None
+                        if isinstance(result_info, dict):
+                            requested = result_info.get("requested_formats")
+                            if requested is None:
+                                requested = result_info.get("requested_downloads")
+
+                        selected_ids = []
+                        if isinstance(requested, list):
+                            for it in requested:
+                                if isinstance(it, dict) and it.get("format_id"):
+                                    selected_ids.append(str(it.get("format_id")))
+                        elif isinstance(requested, dict) and requested.get("format_id"):
+                            selected_ids.append(str(requested.get("format_id")))
+                        elif isinstance(result_info, dict) and result_info.get("format_id"):
+                            selected_ids.append(str(result_info.get("format_id")))
+
+                        if selected_ids:
+                            logger.info(
+                                f"yt-dlp selected format_id(s): {','.join(selected_ids)}"
+                            )
+                    except Exception:
+                        pass
 
                     downloaded_files = list(video_dir.glob("video.*"))
                     downloaded_files = [f for f in downloaded_files if not f.suffix in [".part", ".ytdl", ".temp"]]
@@ -635,6 +724,13 @@ class VideoURLDownloader:
                     file_size = final_path.stat().st_size
                     if file_size == 0:
                         raise RuntimeError("Downloaded file is empty")
+
+                    # Log actual on-disk media characteristics for debugging/resolution checks.
+                    probe = self._ffprobe_stream_summary(final_path)
+                    if probe.get("ok") is True:
+                        logger.info(f"Downloaded media probe: {probe}")
+                    else:
+                        logger.debug(f"ffprobe failed for downloaded media: {probe}")
 
                     expected_size = info.get("filesize") or info.get("filesize_approx")
                     if expected_size and file_size < expected_size * 0.5:
