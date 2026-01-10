@@ -418,7 +418,10 @@ class VideoURLDownloader:
             "format": f"{self.DEFAULT_FORMAT}/{self.PROGRESSIVE_FALLBACK_FORMAT}",
         }
 
-        client_profiles = [android_profile, web_profile, ios_profile]
+        # Web is the most stable / lowest-maintenance default (no PO token dependency).
+        # Android is kept as a last resort because higher-quality HTTPS formats increasingly
+        # require a PO token; without it, yt-dlp may fall back to very low-res progressive itags.
+        client_profiles = [web_profile, ios_profile, android_profile]
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             profile = client_profiles[min(attempt - 1, len(client_profiles) - 1)]
