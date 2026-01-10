@@ -24,6 +24,7 @@ dependencies = [
     "yt-dlp>=2025.12.8",
     "validators>=0.35.0",
     "easyocr>=1.7",
+    "yt-dlp-ejs>=0.3.2",
 ]
 
 [tool.ruff]

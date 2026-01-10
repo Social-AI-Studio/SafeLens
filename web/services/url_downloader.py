@@ -386,6 +386,25 @@ class VideoURLDownloader:
 
         return opts
 
+    @staticmethod
+    def _info_has_video_stream(info: Dict[str, Any]) -> bool:
+        """
+        Best-effort check that the extractor returned at least one format with video.
+
+        This prevents us from "successfully" downloading audio-only when YouTube/EJS
+        challenges hide video formats.
+        """
+        formats = info.get("formats") or []
+        if not isinstance(formats, list):
+            return False
+        for fmt in formats:
+            if not isinstance(fmt, dict):
+                continue
+            vcodec = fmt.get("vcodec")
+            if isinstance(vcodec, str) and vcodec != "none":
+                return True
+        return False
+
     def download_video(
         self,
         url: str,
@@ -472,6 +491,19 @@ class VideoURLDownloader:
                     extractor = info.get("extractor", "Unknown")
                     title = info.get("title", "Unknown")
                     logger.info(f"Video detected from {extractor}: {title}")
+
+                    if not self._info_has_video_stream(info):
+                        last_error = (
+                            "Extractor returned no video formats; likely blocked by YouTube JS/EJS challenges"
+                        )
+                        last_error_code = DownloadErrorCode.EXTRACTION_FAILED
+                        if attempt < self.MAX_RETRIES:
+                            logger.warning(
+                                f"{last_error}. Retrying with fallback client..."
+                            )
+                            continue
+                        logger.error(last_error)
+                        break
 
                     logger.info(f"Starting download for video: {title}")
                     # Avoid re-extracting info (which can trigger extra JS challenge failures).
