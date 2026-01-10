@@ -414,7 +414,8 @@ class VideoURLDownloader:
         android_profile = {
             "name": "android",
             "player_client": "android",
-            "format": f"{self.PROGRESSIVE_FALLBACK_FORMAT}/{self.DEFAULT_FORMAT}",
+            # Prefer best <=1080p first; fall back to progressive-only itags (22/18) if needed.
+            "format": f"{self.DEFAULT_FORMAT}/{self.PROGRESSIVE_FALLBACK_FORMAT}",
         }
 
         client_profiles = [android_profile, web_profile, ios_profile]
