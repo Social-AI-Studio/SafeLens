@@ -16,9 +16,14 @@ interface ModelSelectorProps {
 }
 
 const models = [
-    { value: "meta-llama/llama-3-8b-instruct", label: "Llama 3 8B" },
     { value: "SafeLens/llama-3-8b", label: "Llama 3 8B (FT)" },
-    { value: "google/gemini-2.0-flash-001", label: "Gemini Flash 2.0" },
+    { value: "meta-llama/llama-3-8b-instruct", label: "Llama 3 8B" },
+    { value: "meta-llama/llama-3.1-8b-instruct", label: "Llama 3.1 8B" },
+    { value: "google/gemini-3-flash-preview", label: "Gemini 3 Flash (Preview)" },
+    { value: "openai/gpt-4o-mini", label: "GPT-4o Mini" },
+    { value: "anthropic/claude-3.5-haiku", label: "Claude 3.5 Haiku" },
+    { value: "mistralai/mistral-7b-instruct", label: "Mistral 7B Instruct" },
+    { value: "qwen/qwen-2.5-7b-instruct", label: "Qwen 2.5 7B Instruct" },
 ];
 
 export default function ModelSelector({ value, onModelChange }: ModelSelectorProps) {
