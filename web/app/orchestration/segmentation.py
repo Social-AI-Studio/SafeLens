@@ -980,6 +980,13 @@ def normalize_non_overlap(
         candidates = [b for b in transcript_bounds if b >= t and (b - t) <= tol]
         return min(candidates) if candidates else t
 
+    def snap_down_to_transcript(t: float) -> float:
+        """Snap time down to nearest transcript boundary within tolerance."""
+        if not cfg.trim_to_transcript_boundaries or not transcript_bounds:
+            return t
+        candidates = [b for b in transcript_bounds if b <= t and (t - b) <= tol]
+        return max(candidates) if candidates else t
+
     logger.info(f"Normalizing {len(segs)} segments for non-overlap")
     
     for seg in segs:
@@ -1002,10 +1009,36 @@ def normalize_non_overlap(
             # Else trim current start
             new_start = snap_up_to_transcript(max(last_end, s))
             if (e - new_start) < (cfg.min_len_sec * drop_tiny_factor):
-                logger.debug(f"Dropping tiny segment after trim: [{new_start:.1f}, {e:.1f}]")
-                continue  # Too tiny after trim
-            s = new_start
-            logger.debug(f"Trimmed overlapping segment start: {seg['start']:.1f} -> {s:.1f}")
+                prev = final[-1]
+                boundary = max(prev['start'] + cfg.min_len_sec, e - cfg.min_len_sec)
+                boundary = snap_down_to_transcript(boundary)
+
+                if boundary > prev['start'] and boundary < e and (e - boundary) >= cfg.min_len_sec:
+                    prev['end'] = boundary
+                    last_end = prev['end']
+                    s = boundary
+                    logger.debug(
+                        f"Reallocated overlap boundary: prev_end -> {boundary:.1f}"
+                    )
+                else:
+                    merged_seg = {
+                        'start': prev['start'],
+                        'end': max(prev['end'], e)
+                    }
+                    split_segments = force_split_smart(merged_seg, cfg)
+                    final.pop()
+                    final.extend(
+                        {'start': split_seg['start'], 'end': split_seg['end']}
+                        for split_seg in split_segments
+                    )
+                    last_end = final[-1]['end'] if final else None
+                    logger.debug(
+                        f"Merged overlap into {len(split_segments)} segments to preserve coverage"
+                    )
+                    continue
+            else:
+                s = new_start
+                logger.debug(f"Trimmed overlapping segment start: {seg['start']:.1f} -> {s:.1f}")
 
         # Soft max guard (large outliers should be split earlier)
         if (e - s) > soft_max:
