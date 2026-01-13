@@ -44,11 +44,22 @@ class SegmentationConfig:
     seg_llm_timeout_sec: float = 30.0
 
     # Visual boundary capping
-    max_visual_frames: Optional[int] = None
+    max_visual_frames: Optional[int] = 64
     
     @classmethod
     def from_env(cls) -> "SegmentationConfig":
         """Create config from environment variables with fallbacks to defaults."""
+        device = os.getenv("SEG_DEVICE", cls.device)
+        if device.lower() == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        max_visual_frames_env = os.getenv("SEG_MAX_VISUAL_FRAMES")
+        if max_visual_frames_env is None or max_visual_frames_env == "":
+            max_visual_frames = cls.max_visual_frames
+        else:
+            max_visual_frames_value = int(max_visual_frames_env)
+            max_visual_frames = max_visual_frames_value if max_visual_frames_value > 0 else None
+
         return cls(
             min_len_sec=float(os.getenv("SEG_MIN_LEN_SEC", cls.min_len_sec)),
             max_len_sec=float(os.getenv("SEG_MAX_LEN_SEC", cls.max_len_sec)),
@@ -56,7 +67,7 @@ class SegmentationConfig:
             sample_interval_sec=float(os.getenv("SEG_SAMPLE_INTERVAL_SEC", cls.sample_interval_sec)),
             batch_size=int(os.getenv("SEG_BATCH_SIZE", cls.batch_size)),
             vit_model=os.getenv("SEG_VIT_MODEL", cls.vit_model),
-            device=os.getenv("SEG_DEVICE", cls.device),
+            device=device,
             nltk_min_sentence_chars=int(os.getenv("SEG_NLTK_MIN_SENTENCE_CHARS", cls.nltk_min_sentence_chars)),
             max_iterations=int(os.getenv("SEG_MAX_ITERATIONS", cls.max_iterations)),
             merge_threshold_factor=float(os.getenv("SEG_MERGE_THRESHOLD_FACTOR", cls.merge_threshold_factor)),
@@ -71,7 +82,7 @@ class SegmentationConfig:
             max_frames_per_segment=int(os.getenv("MAX_FRAMES_PER_SEG", cls.max_frames_per_segment)),
             suspicion_mode=os.getenv("SUSPICION_MODE", cls.suspicion_mode),
             seg_llm_timeout_sec=float(os.getenv("SEG_LLM_TIMEOUT_SEC", cls.seg_llm_timeout_sec)),
-            max_visual_frames=int(os.getenv("SEG_MAX_VISUAL_FRAMES", 0)) or None,
+            max_visual_frames=max_visual_frames,
         )
     
     def validate(self) -> None:

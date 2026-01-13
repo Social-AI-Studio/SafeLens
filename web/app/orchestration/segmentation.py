@@ -312,15 +312,25 @@ def find_visual_boundaries(
             logger.warning(f"Invalid FPS: {fps}")
             return []
             
+        duration = max(0.0, end - start)
+        effective_interval = sampling_interval_sec
+        if max_visual_frames:
+            adaptive_interval = duration / max_visual_frames if duration > 0 else sampling_interval_sec
+            effective_interval = max(sampling_interval_sec, adaptive_interval)
+            if effective_interval > sampling_interval_sec:
+                logger.info(
+                    f"Adaptive sampling interval {effective_interval:.2f}s for {duration:.1f}s span (cap {max_visual_frames})"
+                )
+
         # Calculate sampling points
         sample_times = []
         current_time = start
         while current_time < end:
             sample_times.append(current_time)
-            current_time += sampling_interval_sec
+            current_time += effective_interval
 
         if max_visual_frames and len(sample_times) > max_visual_frames:
-            step = (end - start) / max_visual_frames
+            step = duration / max_visual_frames if max_visual_frames else sampling_interval_sec
             sample_times = [start + i * step for i in range(max_visual_frames)]
             sample_times = [t for t in sample_times if start <= t < end]
             logger.info(
@@ -331,7 +341,7 @@ def find_visual_boundaries(
             logger.info("Not enough samples for boundary detection")
             return []
             
-        logger.info(f"Sampling {len(sample_times)} frames at {sampling_interval_sec}s intervals")
+        logger.info(f"Sampling {len(sample_times)} frames at ~{effective_interval:.2f}s intervals")
         
         # Extract frames
         frames = []
@@ -402,6 +412,52 @@ def find_visual_boundaries(
         return []
 
 
+def get_cached_visual_boundaries(
+    start: float,
+    end: float,
+    visual_cache: Dict[Tuple[float, float], List[float]],
+) -> Optional[List[float]]:
+    cache_key = (round(start, 3), round(end, 3))
+    if cache_key in visual_cache:
+        logger.info(f"Using cached visual boundaries for span {cache_key}")
+        return visual_cache[cache_key]
+
+    reuse: Optional[List[float]] = None
+    reuse_span: Optional[Tuple[float, float]] = None
+
+    for (cached_start, cached_end), boundaries in visual_cache.items():
+        if cached_start <= cache_key[0] and cached_end >= cache_key[1]:
+            reuse = [b for b in boundaries if start < b < end]
+            reuse_span = (cached_start, cached_end)
+            break
+
+    if reuse is not None:
+        logger.info(
+            f"Reusing cached visual boundaries from span {reuse_span} for {cache_key}"
+        )
+        visual_cache[cache_key] = reuse
+        return reuse
+
+    return None
+
+
+def merge_spans(spans: List[Tuple[float, float]], epsilon: float = 1e-3) -> List[Tuple[float, float]]:
+    if not spans:
+        return []
+
+    sorted_spans = sorted(spans, key=lambda span: span[0])
+    merged = [list(sorted_spans[0])]
+
+    for start, end in sorted_spans[1:]:
+        _, last_end = merged[-1]
+        if start <= last_end + epsilon:
+            merged[-1][1] = max(last_end, end)
+        else:
+            merged.append([start, end])
+
+    return [(start, end) for start, end in merged]
+
+
 def split_long_segment(
     seg: Dict,
     video_path: str,
@@ -439,9 +495,12 @@ def split_long_segment(
 
     cache_key = (round(start, 3), round(end, 3))
     visual_boundaries: List[float]
-    if visual_cache is not None and cache_key in visual_cache:
-        visual_boundaries = visual_cache[cache_key]
-        logger.info(f"Using cached visual boundaries for span {cache_key}")
+    cached_boundaries = None
+    if visual_cache is not None:
+        cached_boundaries = get_cached_visual_boundaries(start, end, visual_cache)
+
+    if cached_boundaries is not None:
+        visual_boundaries = cached_boundaries
     else:
         visual_boundaries = find_visual_boundaries(
             video_path,
@@ -507,9 +566,17 @@ def split_long_segment(
     if not result_segments:
         logger.warning("No valid splits found, using force split")
         return force_split_smart(seg, cfg)
-    
-    logger.info(f"Split into {len(result_segments)} segments")
-    return result_segments
+
+    enforced_segments = []
+    for result_seg in result_segments:
+        seg_duration = result_seg['end'] - result_seg['start']
+        if seg_duration > cfg.max_len_sec:
+            enforced_segments.extend(force_split_smart(result_seg, cfg))
+        else:
+            enforced_segments.append(result_seg)
+
+    logger.info(f"Split into {len(enforced_segments)} segments")
+    return enforced_segments
 
 
 def force_split_smart(seg: Dict, cfg: SegmentationConfig) -> List[Dict]:
@@ -672,19 +739,48 @@ def process_segments(
     # Per-run cache for visual boundaries to avoid recomputing on the same spans
     visual_cache: Dict[Tuple[float, float], List[float]] = {}
 
+    vit_available = False
     # Load ViT model
     try:
         image_processor, vit_model = load_vit(cfg.vit_model, cfg.device)
+        vit_available = True
     except Exception as e:
         logger.error(f"Failed to load ViT model: {e}")
-        # Fallback to transcript-only processing
-        segments = transcript_segments.copy()
-    else:
-        segments = transcript_segments.copy()
+
+    segments = transcript_segments.copy()
     
     # Sort segments by start time
     segments.sort(key=lambda x: x['start'])
-    
+
+    if vit_available:
+        long_spans = [
+            (seg['start'], seg['end'])
+            for seg in segments
+            if (seg['end'] - seg['start']) > cfg.max_len_sec
+        ]
+        if long_spans:
+            merged_spans = merge_spans(long_spans)
+            logger.info(
+                f"Precomputing visual boundaries for {len(merged_spans)} merged spans "
+                f"(from {len(long_spans)} long transcript spans)"
+            )
+            for span_start, span_end in merged_spans:
+                cache_key = (round(span_start, 3), round(span_end, 3))
+                if cache_key in visual_cache:
+                    continue
+                boundaries = find_visual_boundaries(
+                    video_path,
+                    span_start,
+                    span_end,
+                    image_processor,
+                    vit_model,
+                    cfg.sample_interval_sec,
+                    cfg.batch_size,
+                    cfg.scene_threshold,
+                    cfg.max_visual_frames,
+                )
+                visual_cache[cache_key] = boundaries
+
     logger.info(f"Starting iterative processing with {len(segments)} segments")
     
     for iteration in range(cfg.max_iterations):
@@ -724,18 +820,20 @@ def process_segments(
         segments = merged_segments
         
         # Then split segments that exceed max length
-        if 'image_processor' in locals() and 'vit_model' in locals():
-            split_segments = []
-            for seg in segments:
-                duration = seg['end'] - seg['start']
-                if duration > cfg.max_len_sec:
+        split_segments = []
+        for seg in segments:
+            duration = seg['end'] - seg['start']
+            if duration > cfg.max_len_sec:
+                if vit_available:
                     split_result = split_long_segment(
                         seg, video_path, transcript_segments, image_processor, vit_model, cfg, visual_cache
                     )
-                    split_segments.extend(split_result)
                 else:
-                    split_segments.append(seg)
-            segments = split_segments
+                    split_result = force_split_smart(seg, cfg)
+                split_segments.extend(split_result)
+            else:
+                split_segments.append(seg)
+        segments = split_segments
         
         segments.sort(key=lambda x: x['start'])
         
@@ -747,7 +845,7 @@ def process_segments(
             break
     
     # Final merge pass for tiny segments
-    if 'image_processor' in locals() and 'vit_model' in locals():
+    if vit_available:
         segments = merge_tiny_segments(
             segments, video_path, transcript_segments, image_processor, vit_model, cfg, visual_cache
         )
@@ -780,6 +878,19 @@ def process_segments(
     
     # Apply non-overlap normalization
     normalized_segments = normalize_non_overlap(final_segments, transcript_bounds, cfg)
+
+    if not vit_available:
+        capped_segments = []
+        for seg in normalized_segments:
+            duration = seg['end'] - seg['start']
+            if duration > cfg.max_len_sec:
+                split_segments = force_split_smart(seg, cfg)
+                capped_segments.extend(
+                    [{'start': split_seg['start'], 'end': split_seg['end']} for split_seg in split_segments]
+                )
+            else:
+                capped_segments.append(seg)
+        normalized_segments = sorted(capped_segments, key=lambda x: x['start'])
     
     return normalized_segments
 

@@ -53,6 +53,24 @@ def warmup_providers() -> Dict[str, Any]:
     # NLTK (sentence tokenizer)
     details["nltk"] = _check_nltk_punkt()
 
+    # ViT (scene detection)
+    if os.getenv("WARMUP_VIT", "false").lower() == "true":
+        try:
+            from ..orchestration.segmentation_config import SegmentationConfig
+            from ..orchestration.segmentation import load_vit
+
+            cfg = SegmentationConfig.from_env()
+            load_vit(cfg.vit_model, cfg.device)
+            details["vit"] = {
+                "ok": True,
+                "model": cfg.vit_model,
+                "device": cfg.device,
+            }
+        except Exception as e:
+            details["vit"] = {"ok": False, "error": str(e)}
+    else:
+        details["vit"] = {"ok": False, "skipped": True}
+
     details["elapsed_ms"] = int((time.time() - started) * 1000)
     return details
 
