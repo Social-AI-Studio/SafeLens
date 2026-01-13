@@ -66,19 +66,34 @@ def segments_from_transcript(full_text: str, word_timestamps: List[Tuple[str, fl
     Returns:
         List of segment dictionaries
     """
+    def resolve_duration(current_duration: Optional[float], fallback_end: Optional[float]) -> float:
+        if current_duration and current_duration > 0:
+            return float(current_duration)
+
+        from .analysis_pipeline import get_true_video_duration_seconds
+
+        resolved = get_true_video_duration_seconds(video_path)
+        if resolved and resolved > 0:
+            return float(resolved)
+        if fallback_end and fallback_end > 0:
+            return float(fallback_end)
+        return 60.0
+
+    transcript_based = False
+
     if full_text and word_timestamps:
         logger.info("Building transcript segments from full text and word timestamps")
         transcript_segments = build_transcript_segments(
             full_text=full_text, word_timestamps=word_timestamps
         )
+        transcript_based = True
     elif full_text:
         logger.info("Building transcript segments from full text only")
         transcript_segments = build_transcript_segments(full_text=full_text)
+        transcript_based = True
     else:
         logger.warning("No transcript available - creating time-based segments")
-        from .analysis_pipeline import get_true_video_duration_seconds
-
-        duration = duration or get_true_video_duration_seconds(video_path) or 60.0
+        duration = resolve_duration(duration, None)
 
         transcript_segments = []
         current_time = 0
@@ -95,9 +110,7 @@ def segments_from_transcript(full_text: str, word_timestamps: List[Tuple[str, fl
             "Transcript segmentation produced 0 segments; falling back to time-based segments. "
             f"full_text_len={len(full_text or '')} word_timestamps_len={len(word_timestamps or [])}"
         )
-        from .analysis_pipeline import get_true_video_duration_seconds
-
-        duration = duration or get_true_video_duration_seconds(video_path) or 60.0
+        duration = resolve_duration(duration, None)
         transcript_segments = []
         current_time = 0.0
         segment_duration = 10.0
@@ -106,6 +119,71 @@ def segments_from_transcript(full_text: str, word_timestamps: List[Tuple[str, fl
             if end_time > current_time:
                 transcript_segments.append({"start": current_time, "end": end_time})
             current_time = end_time
+        transcript_based = False
+
+    if transcript_based and transcript_segments:
+        max_end = max((seg.get("end", 0.0) for seg in transcript_segments), default=0.0)
+        duration = resolve_duration(duration, max_end)
+        if max_end and duration < max_end:
+            duration = max_end
+
+        min_gap = SegmentationConfig.from_env().min_len_sec
+        sanitized_segments = []
+        for seg in transcript_segments:
+            try:
+                start = float(seg.get("start", 0.0))
+                end = float(seg.get("end", 0.0))
+            except (TypeError, ValueError):
+                continue
+
+            if duration and duration > 0:
+                start = max(0.0, min(start, duration))
+                end = max(0.0, min(end, duration))
+
+            if end <= start:
+                continue
+
+            sanitized = dict(seg)
+            sanitized["start"] = start
+            sanitized["end"] = end
+            sanitized_segments.append(sanitized)
+
+        sanitized_segments.sort(key=lambda s: (s["start"], s["end"]))
+        merged_bounds: List[List[float]] = []
+        for seg in sanitized_segments:
+            if not merged_bounds:
+                merged_bounds.append([seg["start"], seg["end"]])
+                continue
+            if seg["start"] <= merged_bounds[-1][1]:
+                merged_bounds[-1][1] = max(merged_bounds[-1][1], seg["end"])
+            else:
+                merged_bounds.append([seg["start"], seg["end"]])
+
+        gap_segments = []
+        if merged_bounds and duration and duration > 0:
+            first_start = merged_bounds[0][0]
+            if first_start >= min_gap:
+                gap_segments.append({"start": 0.0, "end": first_start, "text": ""})
+
+            for (prev_start, prev_end), (next_start, next_end) in zip(
+                merged_bounds, merged_bounds[1:]
+            ):
+                gap = next_start - prev_end
+                if gap >= min_gap:
+                    gap_segments.append({"start": prev_end, "end": next_start, "text": ""})
+
+            last_end = merged_bounds[-1][1]
+            if duration - last_end >= min_gap:
+                gap_segments.append({"start": last_end, "end": duration, "text": ""})
+
+        if gap_segments:
+            logger.info(
+                f"Added {len(gap_segments)} gap segments to cover transcript gaps"
+            )
+
+        transcript_segments = sorted(
+            sanitized_segments + gap_segments, key=lambda s: (s["start"], s["end"])
+        )
 
     logger.info(f"Created {len(transcript_segments)} transcript segments")
     return transcript_segments
