@@ -79,6 +79,69 @@ def get_true_video_duration_seconds(video_path: str) -> float:
     return 0.0
 
 
+def bridge_small_gaps(
+    segments: List[Dict[str, float]],
+    duration: float,
+    min_gap_sec: float,
+    tolerance: float = 1e-3,
+) -> List[Dict[str, float]]:
+    if not segments:
+        return []
+
+    if not duration or duration <= 0:
+        duration = max((seg.get("end", 0.0) for seg in segments), default=0.0) or 60.0
+
+    sanitized = []
+    for seg in segments:
+        try:
+            start = float(seg.get("start", 0.0))
+            end = float(seg.get("end", 0.0))
+        except (TypeError, ValueError):
+            continue
+
+        start = max(0.0, min(start, duration))
+        end = max(0.0, min(end, duration))
+
+        if end <= start:
+            continue
+
+        sanitized.append({"start": start, "end": end})
+
+    if not sanitized:
+        return []
+
+    sanitized.sort(key=lambda s: (s["start"], s["end"]))
+
+    if sanitized[0]["start"] > 0 and sanitized[0]["start"] < min_gap_sec:
+        sanitized[0]["start"] = 0.0
+
+    for i in range(1, len(sanitized)):
+        prev = sanitized[i - 1]
+        curr = sanitized[i]
+        gap = curr["start"] - prev["end"]
+
+        if gap <= tolerance:
+            continue
+
+        if gap < min_gap_sec:
+            mid = prev["end"] + (gap / 2.0)
+            prev["end"] = mid
+            curr["start"] = mid
+
+    if duration - sanitized[-1]["end"] < min_gap_sec:
+        sanitized[-1]["end"] = duration
+
+    bridged: List[Dict[str, float]] = []
+    for seg in sanitized:
+        if bridged and seg["start"] < bridged[-1]["end"]:
+            seg["start"] = bridged[-1]["end"]
+        if seg["end"] <= seg["start"]:
+            continue
+        bridged.append(seg)
+
+    return bridged
+
+
 async def analyze_video_task(video_id: str, video_path: str, db: Session) -> None:
     """Background task to analyze video with memory monitoring and run tracking"""
     start_memory = current_rss_mb()
@@ -329,12 +392,18 @@ async def analyze_video_task(video_id: str, video_path: str, db: Session) -> Non
                         video_path, transcript_segments, cfg
                     )
 
-                    # Write segments to file
-                    write_segments(segments_file, final_segments)
-
                     duration = get_true_video_duration_seconds(video_path)
                     if not duration and final_segments:
                         duration = max(seg["end"] for seg in final_segments)
+                    duration = duration or 60.0
+
+                    final_segments = bridge_small_gaps(
+                        final_segments, duration, cfg.min_len_sec
+                    )
+
+                    # Write segments to file
+                    write_segments(segments_file, final_segments)
+
                     video.duration = int(duration) if duration else None
                     db.commit()
 
