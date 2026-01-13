@@ -173,64 +173,115 @@ def build_transcript_segments(
     elif full_text and word_timestamps:
         logger.info(f"Processing full text with {len(word_timestamps)} word timestamps")
         # Sentence tokenization is best-effort; fall back if NLTK data is missing.
-        
+
+        def clean_token(token: str) -> str:
+            return token.lower().strip('.,!?;:"()[]{}')
+
         # Tokenize into sentences
         sentences = _sent_tokenize_safe(full_text)
         result_segments = []
-        
-        # Create word lookup for timing
-        word_time_map = {}
+
+        cleaned_word_times = []
+        raw_times = []
         for word, time in word_timestamps:
-            word_clean = word.lower().strip('.,!?;:"()[]{}')
-            if word_clean not in word_time_map:
-                word_time_map[word_clean] = []
-            word_time_map[word_clean].append(time)
-        
-        full_text_lower = full_text.lower()
-        char_pos = 0
-        
+            try:
+                timestamp = float(time)
+            except (TypeError, ValueError):
+                continue
+            raw_times.append(timestamp)
+            cleaned = clean_token(word)
+            if cleaned:
+                cleaned_word_times.append((cleaned, timestamp))
+
+        if not raw_times:
+            logger.warning("No usable word timestamps for alignment")
+            return []
+
+        overall_end = max(raw_times)
+        pad_sec = 1.0
+
+        sentence_infos = []
         for sentence in sentences:
-            if len(sentence.strip()) < min_chars:
+            sentence_text = sentence.strip()
+            if len(sentence_text) < min_chars:
                 continue
-                
-            # Find sentence in full text
-            sentence_start_char = full_text_lower.find(sentence.lower(), char_pos)
-            if sentence_start_char == -1:
-                continue
-                
-            sentence_end_char = sentence_start_char + len(sentence)
-            char_pos = sentence_end_char
-            
-            # Map to word timings
-            sentence_words = sentence.lower().split()
-            sentence_words_clean = [w.strip('.,!?;:"()[]{}') for w in sentence_words if w.strip('.,!?;:"()[]{}')]
-            
-            if not sentence_words_clean:
-                continue
-                
-            # Find start and end times
-            start_time = None
-            end_time = None
-            
-            # Find first word time
-            for word in sentence_words_clean:
-                if word in word_time_map and word_time_map[word]:
-                    start_time = min(word_time_map[word])
-                    break
-            
-            # Find last word time
-            for word in reversed(sentence_words_clean):
-                if word in word_time_map and word_time_map[word]:
-                    end_time = max(word_time_map[word]) + 1.0  # Add duration estimate
-                    break
-            
-            if start_time is not None and end_time is not None and end_time > start_time:
+            tokens_clean = [clean_token(token) for token in sentence_text.split()]
+            tokens_clean = [token for token in tokens_clean if token]
+            unit_count = len(tokens_clean) if tokens_clean else max(1, len(sentence_text))
+            sentence_infos.append({
+                'text': sentence_text,
+                'tokens': tokens_clean,
+                'units': unit_count,
+            })
+
+        total_units_remaining = sum(info['units'] for info in sentence_infos)
+        wt_idx = 0
+        last_end = 0.0
+
+        for info in sentence_infos:
+            while wt_idx < len(cleaned_word_times) and cleaned_word_times[wt_idx][1] < last_end:
+                wt_idx += 1
+
+            tokens = info['tokens']
+            match_ratio = 0.0
+            matched_indices: List[int] = []
+
+            if tokens and cleaned_word_times:
+                j = wt_idx
+                for token in tokens:
+                    while j < len(cleaned_word_times) and cleaned_word_times[j][0] != token:
+                        j += 1
+                    if j == len(cleaned_word_times):
+                        break
+                    matched_indices.append(j)
+                    j += 1
+
+                if tokens:
+                    match_ratio = len(matched_indices) / len(tokens)
+
+            if matched_indices and match_ratio >= 0.6:
+                start_time = cleaned_word_times[matched_indices[0]][1]
+                end_time = cleaned_word_times[matched_indices[-1]][1] + pad_sec
+                wt_idx = matched_indices[-1] + 1
+            else:
+                if wt_idx < len(cleaned_word_times):
+                    remaining_start = cleaned_word_times[wt_idx][1]
+                    remaining_end = cleaned_word_times[-1][1]
+                else:
+                    remaining_start = last_end
+                    remaining_end = overall_end
+
+                remaining_start = max(remaining_start, last_end)
+                remaining_end = max(remaining_end, remaining_start)
+                remaining_duration = remaining_end - remaining_start
+
+                proportion = info['units'] / total_units_remaining if total_units_remaining > 0 else 0.0
+                fallback_duration = max(1.0, remaining_duration * proportion)
+                start_time = remaining_start
+                end_time = start_time + fallback_duration
+                if remaining_end > start_time:
+                    end_time = min(end_time, remaining_end + pad_sec)
+                else:
+                    end_time = start_time + pad_sec
+
+            start_time = max(start_time, last_end)
+            if end_time <= start_time:
+                candidate_end = overall_end + pad_sec
+                if candidate_end > start_time:
+                    end_time = candidate_end
+                else:
+                    end_time = start_time + pad_sec
+
+            if end_time > start_time:
                 result_segments.append({
                     'start': start_time,
                     'end': end_time,
-                    'text': sentence.strip()
+                    'text': info['text']
                 })
-        
+                last_end = end_time
+
+            total_units_remaining = max(0.0, total_units_remaining - info['units'])
+
         result_segments.sort(key=lambda x: x['start'])
         logger.info(f"Built {len(result_segments)} transcript segments from full text")
         return result_segments
