@@ -577,6 +577,28 @@ async def _caption_frame(
     return None
 
 
+async def _ocr_frame(
+    frame_info: Dict[str, Any], semaphore: asyncio.Semaphore
+) -> Optional[Tuple[float, str]]:
+    frame_path = frame_info["path"]
+    timestamp = frame_info["ts"]
+
+    async with semaphore:
+        try:
+            with metrics.measure_operation(
+                "frame_ocr_analysis", video_ts=timestamp, frame_path=frame_path
+            ):
+                ocr_text = await asyncio.to_thread(run_ocr, frame_path)
+
+            if ocr_text and ocr_text.strip():
+                cleaned_text = ocr_text.strip()
+                return (timestamp, cleaned_text)
+        except Exception as e:
+            logger.warning(f"OCR analysis failed for frame at {timestamp:.1f}s: {e}")
+
+    return None
+
+
 async def gather_evidence(frame_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Gather evidence from sampled frames using vision and OCR.
@@ -590,6 +612,13 @@ async def gather_evidence(frame_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
     captions_parts = []
     ocr_parts = []
     num_frames = len(frame_infos)
+
+    ocr_max_inflight = int(os.getenv("OCR_MAX_INFLIGHT", "2"))
+    ocr_sem = asyncio.Semaphore(max(1, ocr_max_inflight))
+    ocr_tasks = [
+        asyncio.create_task(_ocr_frame(frame_info, ocr_sem))
+        for frame_info in frame_infos
+    ]
 
     # Use GPU guard for vision analysis when analyzing multiple frames
     async with gpu_guard(f"vision_analysis_{num_frames}_frames"):
@@ -606,23 +635,11 @@ async def gather_evidence(frame_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
                 if caption:
                     captions_parts.append(caption)
 
-        for frame_info in frame_infos:
-            frame_path = frame_info["path"]
-            timestamp = frame_info["ts"]
-
-            # OCR analysis with metrics
-            try:
-                with metrics.measure_operation(
-                    "frame_ocr_analysis", video_ts=timestamp, frame_path=frame_path
-                ):
-                    ocr_text = run_ocr(frame_path)
-
-                if ocr_text and ocr_text.strip():
-                    ocr_parts.append(f"[{timestamp:.1f}s] {ocr_text.strip()}")
-            except Exception as e:
-                logger.warning(
-                    f"OCR analysis failed for frame at {timestamp:.1f}s: {e}"
-                )
+    if ocr_tasks:
+        ocr_results = await asyncio.gather(*ocr_tasks)
+        ocr_pairs = [result for result in ocr_results if result]
+        for timestamp, text in sorted(ocr_pairs, key=lambda item: item[0]):
+            ocr_parts.append(f"[{timestamp:.1f}s] {text}")
 
     # Apply text hygiene: dedupe and cap length
     captions_text = _apply_text_hygiene(captions_parts, max_chars=1500)
