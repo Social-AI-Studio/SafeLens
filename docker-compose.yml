@@ -80,6 +80,60 @@ services:
         profiles:
             - core
 
+    frontend:
+        build:
+            context: ./web/frontend
+            dockerfile: Dockerfile
+        image: safelens-frontend
+        ports:
+            - "3000:3000"
+        env_file:
+            - ./web/frontend/.env
+        environment:
+            BACKEND_URL: "http://web:8000"
+            AUTH_ISSUER_URL: "https://auth.thinkadaptive.ai/api/auth"
+            AUTH_URL: "https://staging.thinkadaptive.ai"
+            NEXT_PUBLIC_APP_URL: "https://staging.thinkadaptive.ai"
+            NEXTAUTH_URL: "https://staging.thinkadaptive.ai"
+        depends_on:
+            web:
+                condition: service_healthy
+            auth:
+                condition: service_started
+        healthcheck:
+            test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+            interval: 30s
+            timeout: 5s
+            retries: 10
+        restart: unless-stopped
+        profiles:
+            - core
+
+    auth:
+        build:
+            context: ./auth-service
+            dockerfile: Dockerfile
+        image: safelens-auth
+        ports:
+            - "8888:8888"
+        env_file:
+            - ./auth-service/.env
+        environment:
+            DATABASE_URL: "postgres://${AUTH_DB_USER}:${AUTH_DB_PASSWORD}@auth_db:5432/${AUTH_DB_NAME}"
+            AUTH_BASE_URL: "https://auth.thinkadaptive.ai/api/auth"
+            NEXT_PUBLIC_BETTER_AUTH_URL: "https://auth.thinkadaptive.ai/api/auth"
+        depends_on:
+            auth_db:
+                condition: service_healthy
+        healthcheck:
+            test: ["CMD-SHELL", "node -e \"fetch('http://localhost:8888/sign-in').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+            interval: 30s
+            timeout: 5s
+            retries: 10
+        restart: unless-stopped
+        profiles:
+            - core
+
     vllm_llama:
         image: vllm/vllm-openai:nightly
         command:
@@ -220,6 +274,7 @@ services:
 
     cloudflared_web:
         image: cloudflare/cloudflared:latest
+        user: "0:0"
         command:
             - "tunnel"
             - "--config"
@@ -228,7 +283,7 @@ services:
         volumes:
             - ${HOME}/.cloudflared:/home/dylan/.cloudflared:ro
         depends_on:
-            web:
+            frontend:
                 condition: service_started
         restart: unless-stopped
         profiles:
@@ -236,6 +291,7 @@ services:
 
     cloudflared_auth:
         image: cloudflare/cloudflared:latest
+        user: "0:0"
         command:
             - "tunnel"
             - "--config"
@@ -243,6 +299,9 @@ services:
             - "run"
         volumes:
             - ${HOME}/.cloudflared:/home/dylan/.cloudflared:ro
+        depends_on:
+            auth:
+                condition: service_started
         restart: unless-stopped
         profiles:
             - edge
