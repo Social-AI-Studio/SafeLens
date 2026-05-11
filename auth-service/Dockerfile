@@ -31,4 +31,4 @@ ENV PORT=8888
 RUN corepack enable
 COPY --from=builder /app ./
 EXPOSE 8888
-CMD ["pnpm", "start", "--", "-p", "8888"]
+CMD ["pnpm", "exec", "next", "start", "-p", "8888"]
